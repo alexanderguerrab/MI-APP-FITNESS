@@ -566,14 +566,72 @@ const analytics = getAnalytics(app);
         }
       });
 
-      function iniciarSesion() {
-        const email = document.getElementById('login-email').value;
-        const pass = document.getElementById('login-password').value;
-        firebase.auth().signInWithEmailAndPassword(email, pass)
-          .catch((error) => {
-            document.getElementById('login-error').innerText = error.message;
-          });
-      }
+      <script>
+  const firebaseConfig = {
+    apiKey: "TU_API_KEY",
+    authDomain: "tu-proyecto.firebaseapp.com",
+    projectId: "tu-proyecto",
+    storageBucket: "tu-proyecto.appspot.com",
+    messagingSenderId: "123456789",
+    appId: "1:123:web:abc"
+  };
+  firebase.initializeApp(firebaseConfig);
+
+  const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzK_d6YmK4z8g8aDzXonyaBU5SQ6sd2EjzziJ8DXzzeLEgsv6tnbIh0GkU0F12nCDJc/exec";
+
+  let currentUserToken = null;
+  var misDatosGlobales = {};
+  var diaActivoEdicion = 0;
+
+  firebase.auth().onAuthStateChanged((user) => {
+    if (user) {
+      currentUserToken = user.uid;
+      document.getElementById('login-screen').style.display = 'none';
+      cargarDatosPrincipales();
+    } else {
+      document.getElementById('login-screen').style.display = 'flex';
+    }
+  });
+
+  // Definida globalmente para que el botón la encuentre
+  function iniciarSesion() {
+    const email = document.getElementById('login-email').value;
+    const pass = document.getElementById('login-password').value;
+    firebase.auth().signInWithEmailAndPassword(email, pass)
+      .catch((error) => {
+        document.getElementById('login-error').innerText = error.message;
+      });
+  }
+
+  async function llamarAPI(action, datos = {}) {
+    try {
+      const response = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify({ action: action, userId: currentUserToken, datos: datos })
+      });
+      return await response.json();
+    } catch (err) {
+      console.error("Error en la petición API:", err);
+      return null;
+    }
+  }
+
+  async function cargarDatosPrincipales() {
+    var datos = await llamarAPI("getDashboardData");
+    if (!datos) return;
+    misDatosGlobales = datos;
+    document.getElementById('val-nombre').innerText = datos.nombre || "Usuario";
+    document.getElementById('val-peso').innerText = (datos.peso || "--") + " kg";
+  }
+
+  function cambiarPestana(pestana) {
+    ['perfil', 'diario', 'calculadoras', 'recetas'].forEach(p => {
+      document.getElementById('pestana-' + p).style.display = (p === pestana) ? 'block' : 'none';
+      document.getElementById('btn-menu-' + p).classList.remove('active');
+    });
+    document.getElementById('btn-menu-' + pestana).classList.add('active');
+  }
+</script>
 
       // Reemplazo de google.script.run por peticiones Fetch a la API Web de Apps Script
       async function llamarAPI(action, datos = {}) {
