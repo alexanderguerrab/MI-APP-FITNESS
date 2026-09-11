@@ -1,0 +1,336 @@
+// ==========================================
+// CEREBRO (Código.gs) - Arquitectura Multi-Archivo + LockService + Carpeta Destino
+// ==========================================
+
+var ADMIN_UID = "l6rkm3BVfxWNzbvVEQ5tCkwKSxM2";
+var TEMPLATE_ID = "1Cj0H0zqY6XuEXjkePPEAdPd54Ov_nTl4zvPska68x6s"; 
+var FOLDER_ID = "1nMQT8FRgu6HbAo3cGP2DXyHciZ3lQNYn"; // Carpeta en Drive para guardar las copias
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000); 
+    
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action;
+    var userId = data.userId;
+    var payload = data.datos || {};
+
+    if (!userId) return ContentService.createTextOutput(JSON.stringify({ error: "Falta userId" })).setMimeType(ContentService.MimeType.JSON);
+
+    var resultado = "";
+    switch (action) {
+      case "getDashboardData": resultado = getDashboardData(userId, payload.email); break;
+      case "saveWelcomeData": resultado = saveWelcomeData(payload, userId); break;
+      case "guardarEscalon": resultado = guardarEscalon(payload, userId); break;
+      case "guardarFotoEscalonBackend": resultado = guardarFotoEscalonBackend(payload, userId); break;
+      case "saveMedidasMesUniversal": resultado = saveMedidasMesUniversal(payload, userId); break;
+      case "saveDiaDiario": resultado = saveDiaDiario(payload, userId); break;
+      case "guardarFotosCalculadora": 
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = guardarFotosCalculadora(payload); break;
+      case "saveRecetaBackend": 
+        if (userId !== ADMIN_UID) throw "Solo administrador";
+        resultado = saveRecetaBackend(payload); break;
+      case "actualizarIconoApp": 
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = actualizarIconoApp(payload.url); break;
+      case "getUsersList": 
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = getUsersList(); break;
+      case "cambiarEstadoUser": 
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = cambiarEstadoUser(payload.uid, payload.estado); break;
+      case "eliminarUser": 
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = eliminarUser(payload.uid); break;
+      default: resultado = { error: "Acción no válida" };
+    }
+
+    return ContentService.createTextOutput(JSON.stringify(resultado)).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    var errMsg = error.toString().includes("Lock timeout") ? "Servidor saturado. Intenta de nuevo en unos segundos." : error.toString();
+    return ContentService.createTextOutput(JSON.stringify({ error: errMsg })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function doGet(e) { return ContentService.createTextOutput("API Multi-Archivo Activa.").setMimeType(ContentService.MimeType.TEXT); }
+
+// ==========================================
+// ENRUTADOR MULTI-ARCHIVO (CLONACIÓN Y APERTURA)
+// ==========================================
+function getUserSpreadsheet(userId, email, nombre) {
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var dbSheet = centralSs.getSheetByName("DB_Perfiles");
+  var data = dbSheet.getRange("A2:Q").getValues(); 
+  var targetRow = -1;
+  var sheetId = "";
+  var estado = "Autorizado";
+
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] == userId) {
+      targetRow = i + 2;
+      estado = data[i][14] || "Autorizado"; 
+      sheetId = data[i][16]; // Col Q
+      
+      if (email && data[i][15] === "") dbSheet.getRange(targetRow, 16).setValue(email);
+      break;
+    }
+  }
+
+  if (targetRow === -1) {
+    targetRow = dbSheet.getLastRow() + 1;
+    estado = (userId === ADMIN_UID) ? "Autorizado" : "Pendiente";
+    dbSheet.getRange(targetRow, 1).setValue(userId); 
+    dbSheet.getRange(targetRow, 15).setValue(estado); 
+    if (email) dbSheet.getRange(targetRow, 16).setValue(email); 
+  }
+
+  if (!sheetId || sheetId === "") {
+    var template = DriveApp.getFileById(TEMPLATE_ID);
+    var targetFolder = DriveApp.getFolderById(FOLDER_ID);
+    var copy = template.makeCopy("Fitness Pro - " + (email || userId), targetFolder);
+    sheetId = copy.getId();
+    dbSheet.getRange(targetRow, 17).setValue(sheetId);
+  }
+
+  return { ss: SpreadsheetApp.openById(sheetId), estado: estado, esNuevo: (sheetId === "") };
+}
+
+function actualizarDBPerfiles(userId, pSheet, nombre) {
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var uids = dbSheet.getRange("A2:A").getValues();
+  var targetRow = -1;
+  for (var i = 0; i < uids.length; i++) { if (uids[i][0] == userId) { targetRow = i + 2; break; } }
+  if (targetRow === -1) return;
+
+  var pesoIni = pSheet.getRange("A10").getValue();
+  var talla = pSheet.getRange("A7").getValue();
+  var pesoId = pSheet.getRange("A13").getValue();
+  var fNac = pSheet.getRange("A19").getDisplayValue();
+  var deficit = pSheet.getRange("C19").getValue();
+  var pObj = pSheet.getRange("A16").getValue();
+  var avatarUrl = readImageUrl(pSheet, "A21");
+  var pesoAct = pSheet.getRange("K31").getValue();
+  var evolucion = pSheet.getRange("K27").getValue();
+  
+  var rowData = [[nombre || pSheet.getRange("A2").getValue(), pesoIni, talla, pesoId, fNac, deficit, pObj, avatarUrl, pesoAct, evolucion]];
+  dbSheet.getRange(targetRow, 2, 1, 10).setValues(rowData);
+}
+
+// ==========================================
+// FUNCIONES AUXILIARES
+// ==========================================
+function parseFloatSafe(val) { if (val === "" || val === undefined || val === null) return ""; var str = String(val).replace(',', '.'); var num = parseFloat(str); return isNaN(num) ? "" : num; }
+function readImageUrl(sheet, cellStr) { var formula = sheet.getRange(cellStr).getFormula(); if (formula && formula.toUpperCase().indexOf('=IMAGE') !== -1) { var match = formula.match(/=IMAGE\("([^"]+)"/i); if (match) return match[1]; } return sheet.getRange(cellStr).getDisplayValue(); }
+function writeImageUrl(sheet, cellStr, url) { var range = sheet.getRange(cellStr); if (url && url.toString().startsWith("http")) { var directUrl = url; var regex = /drive\.google\.com\/(?:file\/d\/|open\?id=)([-_a-zA-Z0-9]+)/; var match = url.match(regex); if (match && match[1]) { directUrl = "https://drive.google.com/thumbnail?id=" + match[1] + "&sz=w1000"; } range.setFormula('=IMAGE("' + directUrl + '")'); } else { range.setValue(url); } }
+
+function restaurarFormulasPerfil(sheet) {
+  var ss = sheet.getParent(); var calcSheet = ss.getSheetByName("Calculadora") || ss.getSheetByName("Calculadoras"); var diarioSheet = ss.getSheetByName("Diario"); var today = new Date(); today.setHours(0,0,0,0);
+  var fNacVal = sheet.getRange("A19").getValue(); if (fNacVal && fNacVal instanceof Date) { sheet.getRange("A4").setValue(Math.floor((today - fNacVal) / (365.25 * 24 * 60 * 60 * 1000))); } else { sheet.getRange("A4").setValue(""); }
+  var edadVal = parseFloatSafe(sheet.getRange("A4").getValue()); var tallaVal = parseFloatSafe(sheet.getRange("A7").getValue()); var pesoObj = parseFloatSafe(sheet.getRange("A16").getValue()); if (pesoObj === "") pesoObj = 0;
+  if (calcSheet) { sheet.getRange("A13").setValue(calcSheet.getRange("D6").getValue()); }
+  var c2Val = sheet.getRange("C2").getValue(); sheet.getRange("A31").setValue(c2Val);
+  var letras19 = ['C','D','E','F','G','H','I','J','K','L','M','N','O']; var fechasMeses = []; fechasMeses.push(c2Val instanceof Date ? c2Val : new Date(c2Val));
+  for (var i = 1; i < letras19.length; i++) { var prevDate = new Date(fechasMeses[i-1]); if (!isNaN(prevDate.getTime())) { prevDate.setMonth(prevDate.getMonth() + 1); fechasMeses.push(prevDate); sheet.getRange(letras19[i] + "2").setValue(prevDate); } else { fechasMeses.push(""); sheet.getRange(letras19[i] + "2").setValue(""); } }
+  sheet.getRange("C3").setValue(sheet.getRange("A10").getValue());
+  for (var i = 0; i < letras19.length; i++) { var col = letras19[i]; var pesoMes = parseFloatSafe(sheet.getRange(col + "3").getValue()); if (pesoMes !== "") { sheet.getRange(col + "4").setValue(pesoMes - pesoObj); } else { sheet.getRange(col + "4").setValue(""); } if (pesoMes !== "" && tallaVal !== "" && edadVal !== "") { var tmb = (10 * pesoMes) + (6.25 * (tallaVal * 100)) - (5 * edadVal) + 5; sheet.getRange(col + "19").setValue(Math.round((tmb * 1.2) - 500)); } else { sheet.getRange(col + "19").setValue(""); } }
+  var filasA = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163]; var letrasA = ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']; for (var i = 0; i < filasA.length; i++) { sheet.getRange("A" + filasA[i]).setValue(sheet.getRange(letrasA[i] + "2").getValue()); }
+  sheet.getRange("K23").setValue(today);
+  if (diarioSheet) { var pesoActualDiario = diarioSheet.getRange("B382").getValue(); sheet.getRange("K27").setValue(diarioSheet.getRange("C382").getValue()); sheet.getRange("K31").setValue(pesoActualDiario); if (calcSheet) { calcSheet.getRange("D4").setValue(pesoActualDiario); var pNum = parseFloatSafe(pesoActualDiario); if (pNum !== "" && tallaVal !== "" && tallaVal > 0) { calcSheet.getRange("D7").setValue(Math.round((pNum / (tallaVal * tallaVal)) * 10) / 10); } else { calcSheet.getRange("D7").setValue(""); } } }
+  function dateDiffMD(d1, d2) { if (!d1 || !d2 || isNaN(d1.getTime()) || isNaN(d2.getTime())) return ""; var dMin = d1 < d2 ? d1 : d2; var dMax = d1 < d2 ? d2 : d1; var months = (dMax.getFullYear() - dMin.getFullYear()) * 12 + (dMax.getMonth() - dMin.getMonth()); var temp = new Date(dMin.getFullYear(), dMin.getMonth() + months, dMin.getDate()); if (temp > dMax) { months--; temp = new Date(dMin.getFullYear(), dMin.getMonth() + months, dMin.getDate()); } var days = Math.floor((dMax - temp) / (1000 * 60 * 60 * 24)); return months + " meses, " + days + " días"; }
+  var baseDate = new Date(c2Val); for (var i = 0; i < filasA.length; i++) { var f = filasA[i]; var kVal = sheet.getRange("K" + f).getValue(); if (kVal === "" || !kVal) { sheet.getRange("L" + f).setValue(""); } else { sheet.getRange("L" + f).setValue(dateDiffMD(baseDate, new Date(kVal))); } }
+}
+
+function restaurarFormulasDiario(sheet) {
+  var ss = sheet.getParent(); var perfilSheet = ss.getSheetByName("Perfil"); var baseDate = new Date(perfilSheet.getRange("C2").getValue()); var pesoInicial = perfilSheet.getRange("C3").getValue(); var edadVal = perfilSheet.getRange("A4").getValue(); var edad = (edadVal !== "" && !isNaN(parseFloatSafe(edadVal))) ? parseFloatSafe(edadVal) : 30;
+  var dataFull = sheet.getRange("B2:H381").getValues(); var dates = [], diffsC = [], diffsD = [], bpResults = [], sumC = 0, lastPeso = "", lastF = "--", lastG = "--", lastH = "--";
+  function calcBP(bpStr, ed) { if (!bpStr || bpStr === "") return ""; var parts = String(bpStr).replace(/\s/g, "").split("/"); if (parts.length !== 2) return "Formato incorrecto"; var sys = parseInt(parts[0], 10), dia = parseInt(parts[1], 10); if (isNaN(sys) || isNaN(dia)) return "Formato incorrecto"; var t2_sys = (ed < 50) ? 140 : (ed < 70 ? 150 : 160); var t1_sys = (ed < 50) ? 130 : (ed < 70 ? 140 : 150); var te_sys = 120 + (Math.max(3, Math.min(8, Math.floor(ed / 10))) - 3) * 5; if (sys < 90 || dia < 60) return "Baja"; if (sys >= t2_sys || dia >= 90) return "Etapa 2 Alta"; if (sys >= t1_sys || dia >= 80) return "Alta"; if (sys >= te_sys && dia < 80) return "Elevada"; return "Normal"; }
+  for (var i = 0; i < 380; i++) { var d = new Date(baseDate); if (!isNaN(d.getTime())) { d.setDate(d.getDate() + i); dates.push([d]); } else { dates.push([""]); } var bCur = dataFull[i][0]; var pCur = parseFloatSafe(bCur); if (bCur !== "") lastPeso = bCur; if (i > 0) { if (bCur !== "" && pCur !== "") { var pPrev = parseFloatSafe(dataFull[i-1][0]); var diff = pCur - ((dataFull[i-1][0] !== "" && pPrev !== "") ? pPrev : 0); diffsC.push([diff]); sumC += diff; } else { diffsC.push([""]); } } if (bCur !== "" && pCur !== "") { var pIni = parseFloatSafe(pesoInicial); diffsD.push([pCur - ((pesoInicial !== "" && pIni !== "") ? pIni : 0)]); } else { diffsD.push([""]); } if (dataFull[i][4] !== "") lastF = dataFull[i][4]; if (dataFull[i][5] !== "") lastG = dataFull[i][5]; if (dataFull[i][6] !== "") lastH = dataFull[i][6]; bpResults.push([calcBP(dataFull[i][6], edad)]); }
+  sheet.getRange("A2:A381").setValues(dates); sheet.getRange("C3:C381").setValues(diffsC); sheet.getRange("D2:D381").setValues(diffsD); sheet.getRange("I2:I381").setValues(bpResults); sheet.getRange("B382").setValue(lastPeso); sheet.getRange("C382").setValue(sumC); sheet.getRange("F382").setValue(lastF); sheet.getRange("G382").setValue(lastG); sheet.getRange("H382").setValue(lastH); sheet.getRange("I382").setValue(calcBP(lastH !== "--" ? lastH : "", edad));
+  var jRows = [{ r: 10, b1: 2, b2: 9 }, { r: 17, b1: 9, b2: 16 }, { r: 24, b1: 16, b2: 23 }, { r: 31, b1: 23, b2: 30 }, { r: 38, b1: 30, b2: 37 }, { r: 45, b1: 37, b2: 44 }, { r: 52, b1: 44, b2: 51 }, { r: 59, b1: 51, b2: 58 }, { r: 66, b1: 58, b2: 65 }, { r: 73, b1: 65, b2: 72 }, { r: 80, b1: 72, b2: 79 }, { r: 87, b1: 79, b2: 86 }, { r: 95, b1: 86, b2: 93 }, { r: 101, b1: 93, b2: 100 }, { r: 108, b1: 100, b2: 107 }, { r: 115, b1: 107, b2: 114 }, { r: 122, b1: 114, b2: 121 }, { r: 129, b1: 121, b2: 128 }, { r: 136, b1: 128, b2: 135 }, { r: 143, b1: 135, b2: 142 }, { r: 150, b1: 142, b2: 149 }, { r: 157, b1: 149, b2: 156 }, { r: 164, b1: 156, b2: 163 }, { r: 171, b1: 163, b2: 170 }, { r: 178, b1: 170, b2: 177 }, { r: 185, b1: 177, b2: 184 }, { r: 192, b1: 184, b2: 191 }, { r: 199, b1: 191, b2: 198 }, { r: 206, b1: 198, b2: 205 }, { r: 213, b1: 205, b2: 212 }, { r: 220, b1: 212, b2: 219 }, { r: 227, b1: 219, b2: 226 }, { r: 234, b1: 226, b2: 233 }, { r: 241, b1: 233, b2: 240 }, { r: 248, b1: 240, b2: 247 }, { r: 255, b1: 247, b2: 254 }, { r: 262, b1: 254, b2: 261 }, { r: 269, b1: 261, b2: 268 }, { r: 276, b1: 268, b2: 275 }, { r: 283, b1: 275, b2: 282 }, { r: 290, b1: 282, b2: 289 }, { r: 297, b1: 289, b2: 296 }, { r: 304, b1: 296, b2: 303 }, { r: 311, b1: 303, b2: 310 }, { r: 318, b1: 310, b2: 317 }, { r: 325, b1: 317, b2: 324 }, { r: 332, b1: 324, b2: 331 }, { r: 339, b1: 331, b2: 338 }, { r: 346, b1: 338, b2: 345 }, { r: 353, b1: 345, b2: 352 }, { r: 360, b1: 352, b2: 359 }, { r: 368, b1: 359, b2: 366 }, { r: 374, b1: 366, b2: 373 }, { r: 381, b1: 373, b2: 380 }];
+      for (var k = 0; k < jRows.length; k++) { var map = jRows[k]; var b1Val = dataFull[map.b1 - 2][0]; var b2Val = dataFull[map.b2 - 2][0]; var val1 = parseFloatSafe(b1Val); var val2 = parseFloatSafe(b2Val); if (b1Val !== "" && b2Val !== "" && val1 !== "" && val2 !== "") { sheet.getRange("J" + map.r).setValue(val2 - val1); } else { sheet.getRange("J" + map.r).setValue(""); } }
+    }
+
+// ==========================================
+// FUNCIONES PRINCIPALES (LEEN SU PROPIO ARCHIVO)
+// ==========================================
+
+function getDashboardData(userId, email) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "dash_" + userId;
+  if (userId !== ADMIN_UID) { var cachedData = cache.get(cacheKey); if (cachedData) return JSON.parse(cachedData); }
+
+  var userEnv = getUserSpreadsheet(userId, email, "");
+  
+  if (userEnv.estado === "Pendiente" && userId !== ADMIN_UID) {
+    var respPend = { isPendiente: true };
+    cache.put(cacheKey, JSON.stringify(respPend), 300);
+    return respPend;
+  }
+
+  if (userEnv.estado === "Bloqueado" && userId !== ADMIN_UID) {
+    var respBloq = { isBloqueado: true };
+    cache.put(cacheKey, JSON.stringify(respBloq), 300);
+    return respBloq;
+  }
+
+  var pSheet = userEnv.ss.getSheetByName("Perfil");
+  var diarioSheet = userEnv.ss.getSheetByName("Diario"); 
+  var calcSheet = userEnv.ss.getSheetByName("Calculadora") || userEnv.ss.getSheetByName("Calculadoras");
+  
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var recetasSheet = centralSs.getSheetByName("RECETAS") || centralSs.getSheetByName("Recetas"); 
+  var appLogoUrl = readImageUrl(centralSs.getSheetByName("DB_Perfiles"), "N2");
+
+  var DEF_ESC = "https://i.postimg.cc/XvjwD97P/Tu-foto-aqui.jpg"; var DEF_FRE = "https://i.postimg.cc/dVdHKRY5/FRENTE.jpg"; var DEF_ESP = "https://i.postimg.cc/7ZY3KgL7/ESPALDA.jpg"; var DEF_PD = "https://i.postimg.cc/CKRjgSkk/PERFIL-DERECHO.jpg"; var DEF_PI = "https://i.postimg.cc/RhLtRF5D/PERFIL-IZQUIERDO.jpg";
+
+  var nombre = pSheet.getRange("A2").getDisplayValue() || "Usuario";
+  var fechaReg = pSheet.getRange("C2").getDisplayValue();
+  var pesoInicial = pSheet.getRange("A10").getDisplayValue();
+  var talla = pSheet.getRange("A7").getDisplayValue();
+  var pesoIdeal = pSheet.getRange("A13").getDisplayValue(); 
+  var edad = pSheet.getRange("A4").getDisplayValue() || 30;
+  var fechaNac = pSheet.getRange("A19").getDisplayValue(); 
+  var pesoActual = pSheet.getRange("K31").getDisplayValue(); 
+  var deficit = pSheet.getRange("C19").getDisplayValue(); 
+  var pesoObjetivo = pSheet.getRange("A16").getDisplayValue();
+  var genero = calcSheet ? calcSheet.getRange("D2").getDisplayValue() : "Hombre";
+  var imcVal = calcSheet ? calcSheet.getRange("D7").getDisplayValue() : "";
+  var avatarUrl = readImageUrl(pSheet, "A21");
+  var evolucionHoy = pSheet.getRange("K27").getDisplayValue();
+
+  var filasFechas = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163]; var escalonesData = [];
+  for (var i = 0; i < filasFechas.length; i++) { var filaF = filasFechas[i]; var escUrl = readImageUrl(pSheet, "N" + (34 + (i * 11))); escalonesData.push({ estado: pSheet.getRange("K" + (filaF - 4)).getDisplayValue(), fecha: pSheet.getRange("K" + filaF).getDisplayValue(), dias: pSheet.getRange("L" + filaF).getDisplayValue(), foto: (escUrl && escUrl.toString().startsWith("http")) ? escUrl : DEF_ESC }); }
+
+  var medidasMatriz = pSheet.getRange("C2:N18").getDisplayValues(); var mesesData = [];
+  for (var m = 1; m <= 12; m++) { var cI = m - 1; var fFM = 23 + ((m - 1) * 11); var uF = readImageUrl(pSheet, "B" + fFM); var uE = readImageUrl(pSheet, "D" + fFM); var uPD = readImageUrl(pSheet, "F" + fFM); var uPI = readImageUrl(pSheet, "H" + fFM); mesesData.push({ mes: m, fechaMed: medidasMatriz[0][cI], pesoColB: medidasMatriz[1][cI], difObj: medidasMatriz[2][cI], med: { cuello: medidasMatriz[3][cI], hombro: medidasMatriz[4][cI], pecho: medidasMatriz[5][cI], cintura: medidasMatriz[6][cI], brazoI: medidasMatriz[7][cI], brazoD: medidasMatriz[8][cI], anteI: medidasMatriz[9][cI], anteD: medidasMatriz[10][cI], circAb: medidasMatriz[11][cI], musloI: medidasMatriz[12][cI], musloD: medidasMatriz[13][cI], pantI: medidasMatriz[14][cI], pantD: medidasMatriz[15][cI], cadera: medidasMatriz[16][cI] }, fotos: { frente: (uF && uF.toString().startsWith("http")) ? uF : DEF_FRE, espalda: (uE && uE.toString().startsWith("http")) ? uE : DEF_ESP, perfilDer: (uPD && uPD.toString().startsWith("http")) ? uPD : DEF_PD, perfilIzq: (uPI && uPI.toString().startsWith("http")) ? uPI : DEF_PI } }); }
+
+  var diarioDataList = []; var lastRowD = Math.min(diarioSheet.getLastRow(), 381);
+  if (lastRowD >= 2) { var dValues = diarioSheet.getRange(2, 1, lastRowD - 1, 11).getDisplayValues(); for (var d = 0; d < dValues.length; d++) { diarioDataList.push({ fila: d + 2, fecha: dValues[d][0], peso: dValues[d][1], dif: dValues[d][2], progreso: dValues[d][3], energia: dValues[d][4], caminata: dValues[d][5], agua: dValues[d][6], presion: dValues[d][7], presionStat: dValues[d][8], notas: dValues[d][9] }); } }
+
+  var fotosCalc = { img1: "", img2: "", img3: "", img4: "", img5: "" };
+  if (calcSheet) { fotosCalc.img1 = readImageUrl(calcSheet, "B2"); fotosCalc.img2 = readImageUrl(calcSheet, "E1"); fotosCalc.img3 = readImageUrl(calcSheet, "F1"); fotosCalc.img4 = readImageUrl(calcSheet, "G13"); fotosCalc.img5 = readImageUrl(calcSheet, "G1"); }
+
+  var recetasList = [];
+  if (recetasSheet) { var lastRowR = recetasSheet.getLastRow(); if (lastRowR > 1) { var recRaw = recetasSheet.getRange(2, 1, lastRowR - 1, 6).getDisplayValues(); var recFormulas = recetasSheet.getRange(2, 6, lastRowR - 1, 1).getFormulas(); for(var r = 0; r < recRaw.length; r++) { if(!recRaw[r][0]) continue; var picUrl = recRaw[r][5]; var form = recFormulas[r][0]; if (form && form.toUpperCase().indexOf('=IMAGE') !== -1) { var match = form.match(/=IMAGE\("([^"]+)"/i); if (match) picUrl = match[1]; } recetasList.push({ fila: r + 2, nombre: recRaw[r][0], categoria: (recRaw[r][1] || "").toUpperCase().trim(), calorias: recRaw[r][2], ingredientes: recRaw[r][3], preparacion: recRaw[r][4], fotoRaw: picUrl }); } } }
+
+  var responsePayload = { nombre: nombre, fechaReg: fechaReg, pesoInicial: pesoInicial, talla: talla, pesoIdeal: pesoIdeal, edad: edad, fechaNac: fechaNac, peso: pesoActual, deficit: deficit, pesoObjetivo: pesoObjetivo, genero: genero, imc: imcVal, evolucion: evolucionHoy, escalones: escalonesData, meses: mesesData, diario: diarioDataList, calcFotos: fotosCalc, recetas: recetasList, presionActual: diarioSheet.getRange("H382").getDisplayValue(), presionEstado: diarioSheet.getRange("I382").getDisplayValue(), ultimaCaminata: diarioSheet.getRange("F382").getDisplayValue(), ultimoAgua: diarioSheet.getRange("G382").getDisplayValue(), avatarUrl: avatarUrl, appLogoUrl: appLogoUrl, isAdmin: (userId === ADMIN_UID) };
+
+  try {
+    if (userId !== ADMIN_UID) {
+      var jsonStr = JSON.stringify(responsePayload);
+      if (jsonStr.length < 90000) { 
+        cache.put(cacheKey, jsonStr, 300);
+      }
+    }
+  } catch (errCache) {}
+
+  return responsePayload;
+}
+
+function saveWelcomeData(datos, userId) {
+  var userEnv = getUserSpreadsheet(userId, null, datos.nombre);
+  var sheet = userEnv.ss.getSheetByName("Perfil");
+  var calcSheet = userEnv.ss.getSheetByName("Calculadora") || userEnv.ss.getSheetByName("Calculadoras");
+  
+  if (datos.nombre) sheet.getRange("A2").setValue(datos.nombre);
+  if (datos.fechaReg) sheet.getRange("C2").setValue(datos.fechaReg);
+  if (datos.fecha) sheet.getRange("A19").setValue(datos.fecha);
+  if (datos.pesoIni) sheet.getRange("A10").setValue(parseFloatSafe(datos.pesoIni));
+  
+  // Reflejar talla en Perfil A7 y Calculadora D3
+  var tallaNum = parseFloatSafe(datos.talla);
+  if (tallaNum !== "") {
+    sheet.getRange("A7").setValue(tallaNum);
+    if (calcSheet) calcSheet.getRange("D3").setValue(tallaNum);
+  }
+  
+  if (datos.pesoObj !== undefined) sheet.getRange("A16").setValue(parseFloatSafe(datos.pesoObj)); 
+  if (datos.avatarUrl !== undefined) writeImageUrl(sheet, "A21", datos.avatarUrl); 
+  
+  var generoUser = datos.genero || "Hombre";
+  if (datos.genero && calcSheet) calcSheet.getRange("D2").setValue(generoUser);
+
+  // Calcular Peso Ideal para reflejarlo en Calculadora D6 y Perfil A13
+  if (tallaNum !== "" && calcSheet) {
+    var tallaCm = tallaNum * 100;
+    var pesoIdealCalc = (generoUser === 'Hombre') ? (tallaCm - 100 - ((tallaCm - 150) / 4)) : (tallaCm - 100 - ((tallaCm - 150) / 2.5));
+    var pIdArr = Math.round(pesoIdealCalc * 10) / 10;
+    calcSheet.getRange("D6").setValue(pIdArr);
+    sheet.getRange("A13").setValue(pIdArr);
+  }
+
+  restaurarFormulasPerfil(sheet); actualizarDBPerfiles(userId, sheet, datos.nombre); CacheService.getScriptCache().remove("dash_" + userId);
+  return "¡Perfil configurado!";
+}
+
+function guardarEscalon(payload, userId) {
+  var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Perfil");
+  var filasFechas = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163];
+  sheet.getRange("K" + (filasFechas[payload.numero - 1] - 4)).setValue(payload.estado); sheet.getRange("K" + filasFechas[payload.numero - 1]).setValue(payload.fecha);
+  CacheService.getScriptCache().remove("dash_" + userId); return "Guardado";
+}
+
+function guardarFotoEscalonBackend(payload, userId) {
+  var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Perfil");
+  writeImageUrl(sheet, "N" + (34 + (payload.numero - 1) * 11), payload.url); CacheService.getScriptCache().remove("dash_" + userId); return "Foto guardada";
+}
+
+function saveMedidasMesUniversal(payload, userId) {
+  var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Perfil");
+  var colLetra = String.fromCharCode(66 + payload.mes); 
+  sheet.getRange(colLetra + "2").setValue(payload.fechaMed || ""); sheet.getRange(colLetra + "3").setValue(parseFloatSafe(payload.pesoColB)); sheet.getRange(colLetra + "4").setValue(parseFloatSafe(payload.difObj)); sheet.getRange(colLetra + "5").setValue(parseFloatSafe(payload.cuello)); sheet.getRange(colLetra + "6").setValue(parseFloatSafe(payload.hombro)); sheet.getRange(colLetra + "7").setValue(parseFloatSafe(payload.pecho)); sheet.getRange(colLetra + "8").setValue(parseFloatSafe(payload.cintura)); sheet.getRange(colLetra + "9").setValue(parseFloatSafe(payload.brazoI)); sheet.getRange(colLetra + "10").setValue(parseFloatSafe(payload.anteI)); sheet.getRange(colLetra + "11").setValue(parseFloatSafe(payload.anteD)); sheet.getRange(colLetra + "12").setValue(parseFloatSafe(payload.circAb)); sheet.getRange(colLetra + "13").setValue(parseFloatSafe(payload.musloI)); sheet.getRange(colLetra + "14").setValue(parseFloatSafe(payload.musloD)); sheet.getRange(colLetra + "15").setValue(parseFloatSafe(payload.pantI)); sheet.getRange(colLetra + "16").setValue(parseFloatSafe(payload.cadera));
+  var fM = 23 + ((payload.mes - 1) * 11); writeImageUrl(sheet, "B" + fM, payload.fotoFrente); writeImageUrl(sheet, "D" + fM, payload.fotoEspalda); writeImageUrl(sheet, "F" + fM, payload.fotoPerfilDer); writeImageUrl(sheet, "H" + fM, payload.fotoPerfilIzq);
+  restaurarFormulasPerfil(sheet); CacheService.getScriptCache().remove("dash_" + userId); return "Medidas actualizadas";
+}
+
+function saveDiaDiario(datos, userId) {
+  var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Diario"); var pSheet = userEnv.ss.getSheetByName("Perfil");
+  var filaNum = parseInt(datos.fila, 10); var rB = parseFloatSafe(datos.peso);
+  sheet.getRange(filaNum, 2).setValue(rB !== "" ? rB : ""); sheet.getRange(filaNum, 5).setValue(datos.energia || ""); sheet.getRange(filaNum, 6).setValue(datos.caminata || ""); sheet.getRange(filaNum, 7).setValue(datos.agua || ""); sheet.getRange(filaNum, 8).setValue((datos.presion || "").toString().replace(/mmhg/gi, '').replace(/\s+/g, ''));
+  if (!sheet.getRange(filaNum, 10).getFormula()) { sheet.getRange(filaNum, 10).setValue(datos.notas || ""); }
+  SpreadsheetApp.flush(); restaurarFormulasDiario(sheet); restaurarFormulasPerfil(pSheet); actualizarDBPerfiles(userId, pSheet); CacheService.getScriptCache().remove("dash_" + userId); return "Día actualizado correctamente";
+}
+
+function guardarFotosCalculadora(datos) { var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Calculadora") || SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Calculadoras"); if(sheet) { writeImageUrl(sheet, "B2", datos.img1); writeImageUrl(sheet, "E1", datos.img2); writeImageUrl(sheet, "F1", datos.img3); writeImageUrl(sheet, "G13", datos.img4); writeImageUrl(sheet, "G1", datos.img5); return "Fotos guardadas"; } }
+function saveRecetaBackend(datos) { var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RECETAS") || SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Recetas"); var row = datos.fila ? parseInt(datos.fila) : (sheet.getLastRow() + 1); sheet.getRange(row, 1).setValue(datos.nombre); sheet.getRange(row, 2).setValue(datos.categoria); sheet.getRange(row, 3).setValue(datos.calorias); sheet.getRange(row, 4).setValue(datos.ingredientes); sheet.getRange(row, 5).setValue(datos.preparacion); writeImageUrl(sheet, "F" + row, datos.foto); return "Receta guardada"; }
+function actualizarIconoApp(url) { writeImageUrl(SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"), "N2", url); return "Ícono actualizado"; }
+function getUsersList() { var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"); var data = dbSheet.getRange("A2:Q" + Math.max(2, dbSheet.getLastRow())).getDisplayValues(); var users = []; for(var i=0; i<data.length; i++){ if(data[i][0] !== "") { users.push({ uid: data[i][0], nombre: data[i][1], estado: data[i][14] || "Autorizado", email: data[i][15] || "Sin correo", sheetId: data[i][16] }); } } return users; }
+function cambiarEstadoUser(uid, estado) { var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"); var uids = dbSheet.getRange("A2:A").getValues(); for (var i = 0; i < uids.length; i++) { if (uids[i][0] == uid) { dbSheet.getRange(i + 2, 15).setValue(estado); CacheService.getScriptCache().remove("dash_" + uid); return "Estado actualizado"; } } }
+function eliminarUser(uid) { var ss = SpreadsheetApp.getActiveSpreadsheet(); var dbSheet = ss.getSheetByName("DB_Perfiles"); var uids = dbSheet.getRange("A2:A").getValues(); for (var i = 0; i < uids.length; i++) { if (uids[i][0] == uid) { var sheetId = dbSheet.getRange(i+2, 17).getValue(); if(sheetId) { try { DriveApp.getFileById(sheetId).setTrashed(true); } catch(e){} } dbSheet.deleteRow(i + 2); CacheService.getScriptCache().remove("dash_" + uid); return "Usuario eliminado"; } } }
+
+function actualizarEstructuraUsuarios() {
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var dbSheet = centralSs.getSheetByName("DB_Perfiles");
+  var data = dbSheet.getRange("A2:Q" + Math.max(2, dbSheet.getLastRow())).getValues();
+
+  var actualizadas = 0;
+  for (var i = 0; i < data.length; i++) {
+    var sheetId = data[i][16]; // Columna Q donde se almacena el ID de la copia del usuario
+    if (sheetId) {
+      try {
+        var userSs = SpreadsheetApp.openById(sheetId);
+        
+        // ----------------------------------------------------
+        // APLICA AQUÍ TUS CAMBIOS ESTRUCTURALES
+        // ----------------------------------------------------
+        var perfilSheet = userSs.getSheetByName("Perfil");
+        if (perfilSheet) {
+          // Ejemplo: Actualizar o asegurar una celda o fórmula nueva en todas las copias
+          // perfilSheet.getRange("Z1").setValue("Nueva estructura");
+        }
+        
+        // También puedes forzar la restauración de fórmulas si agregaste lógica nueva:
+        // restaurarFormulasPerfil(perfilSheet);
+        
+        actualizadas++;
+      } catch (e) {
+        console.error("No se pudo actualizar la hoja ID: " + sheetId + " - Error: " + e.message);
+      }
+    }
+  }
+  SpreadsheetApp.getActiveSpreadsheet().toast("¡Proceso finalizado! Hojas actualizadas: " + actualizadas);
+}
