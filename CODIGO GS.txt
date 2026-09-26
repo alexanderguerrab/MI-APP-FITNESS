@@ -1,0 +1,781 @@
+// ==========================================
+// CEREBRO (Código.gs) - Arquitectura Multi-Archivo + LockService + Carpeta Destino
+// ==========================================
+
+var ADMIN_UID = "l6rkm3BVfxWNzbvVEQ5tCkwKSxM2"; // El súper admin puede asignar más roles y es el único que edita fotos de calculadoras y recetas por defecto.
+var TEMPLATE_ID = "1Cj0H0zqY6XuEXjkePPEAdPd54Ov_nTl4zvPska68x6s"; 
+var FOLDER_ID = "1nMQT8FRgu6HbAo3cGP2DXyHciZ3lQNYn"; // Carpeta en Drive para guardar las copias
+
+function isUserAdmin(userId) {
+  if (userId === ADMIN_UID) return true;
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var data = dbSheet.getRange("A2:O" + Math.max(2, dbSheet.getLastRow())).getValues();
+  for(var i=0; i<data.length; i++) {
+    if (data[i][0] == userId && data[i][14] == "Admin") return true;
+  }
+  return false;
+}
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000); 
+    
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action;
+    var userId = data.userId;
+    var payload = data.datos || {};
+
+    if (!userId) return ContentService.createTextOutput(JSON.stringify({ error: "Falta userId" })).setMimeType(ContentService.MimeType.JSON);
+
+    var resultado = "";
+    switch (action) {
+      // MÉTODOS BÁSICOS DE USUARIO
+      case "getDashboardData": resultado = getDashboardData(userId, payload.email); break;
+      case "saveWelcomeData": resultado = saveWelcomeData(payload, userId); break;
+      case "guardarEscalon": resultado = guardarEscalon(payload, userId); break;
+      case "guardarFotoEscalonBackend": resultado = guardarFotoEscalonBackend(payload, userId); break;
+      case "saveMedidasMesUniversal": resultado = saveMedidasMesUniversal(payload, userId); break;
+      case "saveDiaDiario": resultado = saveDiaDiario(payload, userId); break;
+      case "registrarTelefono": resultado = registrarTelefono(payload, userId); break;
+      
+      // SOLO SUPER ADMIN (Calculadoras y App)
+      case "guardarFotosCalculadora": 
+        if (userId !== ADMIN_UID) throw "No autorizado. Solo Super Admin.";
+        resultado = guardarFotosCalculadora(payload); break;
+      case "saveRecetaBackend": 
+        if (userId !== ADMIN_UID) throw "Solo administrador. Solo Super Admin.";
+        resultado = saveRecetaBackend(payload); break;
+      case "actualizarIconoApp": 
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = actualizarIconoApp(payload.url); break;
+        
+      // ADMIN Y SUPER ADMIN (Usuarios y Finanzas Original)
+      case "getUsersList": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = getUsersList(); break;
+      case "cambiarEstadoUser": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = cambiarEstadoUser(payload.uid, payload.estado); break;
+      case "eliminarUser": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = eliminarUser(payload.uid); break;
+      case "getFinanzasData": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = getFinanzasData(); break;
+      case "registrarPago": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = registrarPago(payload); break;
+      case "eliminarPago": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = eliminarPago(payload); break;
+      case "editarPagoBackend": 
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = editarPagoBackend(payload); break;
+        
+      // NUEVOS CASOS SAAS, REPORTES Y SCRIPTS
+      case "obtenerDatosControlSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = obtenerDatosControlSaaS(); break;
+      case "guardarCambioControlSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = guardarCambioControlSaaS(payload.index, payload.tipo, payload.valor); break;
+      case "generarSiguienteMesSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = generarSiguienteMesSaaS(payload.index, payload.nuevoMonto); break;
+      case "eliminarRegistroSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = eliminarRegistroSaaS(payload.index); break;
+      case "ejecutarEnvioCobroSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = ejecutarEnvioCobroSaaS(); break;
+      case "obtenerDatosReporteAnualSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = obtenerDatosReporteAnualSaaS(payload.anio); break;
+      case "obtenerDatosReporteClientesSaaS": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = obtenerDatosReporteClientesSaaS(payload.anio, payload.mesTexto); break;
+      case "obtenerScripts": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = obtenerScripts(); break;
+      case "actualizarScripts": 
+        if (!isUserAdmin(userId)) throw "No autorizado"; 
+        resultado = actualizarScripts(payload); break;
+
+      default: resultado = { error: "Acción no válida" };
+    }
+
+    return ContentService.createTextOutput(JSON.stringify(resultado)).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    var errMsg = error.toString().includes("Lock timeout") ? "Servidor saturado. Intenta de nuevo en unos segundos." : error.toString();
+    return ContentService.createTextOutput(JSON.stringify({ error: errMsg })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function doGet(e) { return ContentService.createTextOutput("API Multi-Archivo Activa.").setMimeType(ContentService.MimeType.TEXT); }
+
+// ==========================================
+// REGISTRO DE TELÉFONO EN BD
+// ==========================================
+function registrarTelefono(payload, userId) {
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  dbSheet.getRange("R1").setValue("TELEFONO"); // Asegurar el título en R1
+  var uids = dbSheet.getRange("A2:A").getValues();
+  var targetRow = -1;
+  for (var i = 0; i < uids.length; i++) { 
+    if (uids[i][0] == userId) { targetRow = i + 2; break; } 
+  }
+  
+  if (targetRow === -1) {
+    targetRow = dbSheet.getLastRow() + 1;
+    var estadoInicial = (userId === ADMIN_UID) ? "Autorizado" : "Pendiente";
+    dbSheet.getRange(targetRow, 1).setValue(userId); 
+    dbSheet.getRange(targetRow, 15).setValue(estadoInicial); 
+    if (payload.email) dbSheet.getRange(targetRow, 16).setValue(payload.email); 
+  }
+  
+  dbSheet.getRange(targetRow, 18).setValue(payload.telefono); // Columna R
+  return "Teléfono guardado";
+}
+
+// ==========================================
+// ENRUTADOR MULTI-ARCHIVO (CLONACIÓN Y APERTURA)
+// ==========================================
+function getUserSpreadsheet(userId, email, nombre) {
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var dbSheet = centralSs.getSheetByName("DB_Perfiles");
+  var data = dbSheet.getRange("A2:Q").getValues(); 
+  var targetRow = -1;
+  var sheetId = "";
+  var estado = "Autorizado";
+
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] == userId) {
+      targetRow = i + 2;
+      estado = data[i][14] || "Autorizado"; 
+      sheetId = data[i][16]; // Col Q
+      
+      if (email && data[i][15] === "") dbSheet.getRange(targetRow, 16).setValue(email);
+      break;
+    }
+  }
+
+  if (targetRow === -1) {
+    targetRow = dbSheet.getLastRow() + 1;
+    estado = (userId === ADMIN_UID) ? "Autorizado" : "Pendiente";
+    dbSheet.getRange(targetRow, 1).setValue(userId); 
+    dbSheet.getRange(targetRow, 15).setValue(estado); 
+    if (email) dbSheet.getRange(targetRow, 16).setValue(email); 
+  }
+
+  if (!sheetId || sheetId === "") {
+    if (userId === ADMIN_UID) {
+      sheetId = TEMPLATE_ID;
+      dbSheet.getRange(targetRow, 17).setValue(sheetId);
+    } else {
+      var template = DriveApp.getFileById(TEMPLATE_ID);
+      var targetFolder = DriveApp.getFolderById(FOLDER_ID);
+      var copy = template.makeCopy("Fitness Pro - " + (email || userId), targetFolder);
+      sheetId = copy.getId();
+      dbSheet.getRange(targetRow, 17).setValue(sheetId);
+    }
+  }
+
+  return { ss: SpreadsheetApp.openById(sheetId), estado: estado, esNuevo: (sheetId === "") };
+}
+
+function actualizarDBPerfiles(userId, pSheet, nombre) {
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var uids = dbSheet.getRange("A2:A").getValues();
+  var targetRow = -1;
+  for (var i = 0; i < uids.length; i++) { if (uids[i][0] == userId) { targetRow = i + 2; break; } }
+  if (targetRow === -1) return;
+
+  var pesoIni = pSheet.getRange("A10").getValue();
+  var talla = pSheet.getRange("A7").getValue();
+  var pesoId = pSheet.getRange("A13").getValue();
+  var fNac = pSheet.getRange("A19").getDisplayValue();
+  
+  // Sincronización del déficit calculado en K382 de la hoja Diario
+  var diarioSheet = pSheet.getParent().getSheetByName("Diario");
+  var deficit = diarioSheet ? diarioSheet.getRange("K382").getValue() : pSheet.getRange("C19").getValue();
+  
+  var pObj = pSheet.getRange("A16").getValue();
+  var avatarUrl = readImageUrl(pSheet, "A21");
+  var pesoAct = pSheet.getRange("K31").getValue();
+  var evolucion = pSheet.getRange("K27").getValue();
+  
+  var rowData = [[nombre || pSheet.getRange("A2").getValue(), pesoIni, talla, pesoId, fNac, deficit, pObj, avatarUrl, pesoAct, evolucion]];
+  dbSheet.getRange(targetRow, 2, 1, 10).setValues(rowData);
+}
+
+// ==========================================
+// FUNCIONES AUXILIARES
+// ==========================================
+function parseFloatSafe(val) { if (val === "" || val === undefined || val === null) return ""; var str = String(val).replace(',', '.'); var num = parseFloat(str); return isNaN(num) ? "" : num; }
+function readImageUrl(sheet, cellStr) { var formula = sheet.getRange(cellStr).getFormula(); if (formula && formula.toUpperCase().indexOf('=IMAGE') !== -1) { var match = formula.match(/=IMAGE\("([^"]+)"/i); if (match) return match[1]; } return sheet.getRange(cellStr).getDisplayValue(); }
+function writeImageUrl(sheet, cellStr, url) { var range = sheet.getRange(cellStr); if (url && url.toString().startsWith("http")) { var directUrl = url; var regex = /drive\.google\.com\/(?:file\/d\/|open\?id=)([-_a-zA-Z0-9]+)/; var match = url.match(regex); if (match && match[1]) { directUrl = "https://drive.google.com/thumbnail?id=" + match[1] + "&sz=w1000"; } range.setFormula('=IMAGE("' + directUrl + '")'); } else { range.setValue(url); } }
+
+// Calcula diferencia exacta emulando SIFECHA de Excel
+function calcularDiferenciaMesesDias(fechaInicio, fechaFin) {
+  if (!fechaInicio || !fechaFin) return "";
+  var d1 = new Date(fechaInicio);
+  var d2 = new Date(fechaFin);
+  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return "";
+
+  var m1 = d1.getFullYear() * 12 + d1.getMonth();
+  var m2 = d2.getFullYear() * 12 + d2.getMonth();
+  var meses = m2 - m1;
+  var dias = d2.getDate() - d1.getDate();
+
+  if (dias < 0) {
+    meses--;
+    var ultimoDiaMesAnterior = new Date(d2.getFullYear(), d2.getMonth(), 0).getDate();
+    dias += ultimoDiaMesAnterior;
+  }
+
+  if (meses < 0) return "";
+  return meses + " meses, " + dias + " días";
+}
+
+function restaurarFormulasPerfil(sheet) {
+  var ss = sheet.getParent(); var calcSheet = ss.getSheetByName("Calculadora") || ss.getSheetByName("Calculadoras"); var diarioSheet = ss.getSheetByName("Diario"); var today = new Date(); today.setHours(0,0,0,0);
+  var fNacVal = sheet.getRange("A19").getValue(); if (fNacVal && fNacVal instanceof Date) { sheet.getRange("A4").setValue(Math.floor((today - fNacVal) / (365.25 * 24 * 60 * 60 * 1000))); } else { sheet.getRange("A4").setValue(""); }
+  var edadVal = parseFloatSafe(sheet.getRange("A4").getValue()); var tallaVal = parseFloatSafe(sheet.getRange("A7").getValue()); var pesoObj = parseFloatSafe(sheet.getRange("A16").getValue()); if (pesoObj === "") pesoObj = 0;
+  if (calcSheet) { sheet.getRange("A13").setValue(calcSheet.getRange("D6").getValue()); }
+  var c2Val = sheet.getRange("C2").getValue(); sheet.getRange("A31").setValue(c2Val);
+  var letras19 = ['C','D','E','F','G','H','I','J','K','L','M','N','O']; var fechasMeses = []; fechasMeses.push(c2Val instanceof Date ? c2Val : new Date(c2Val));
+  for (var i = 1; i < letras19.length; i++) { var prevDate = new Date(fechasMeses[i-1]); if (!isNaN(prevDate.getTime())) { prevDate.setMonth(prevDate.getMonth() + 1); fechasMeses.push(prevDate); sheet.getRange(letras19[i] + "2").setValue(prevDate); } else { fechasMeses.push(""); sheet.getRange(letras19[i] + "2").setValue(""); } }
+  sheet.getRange("C3").setValue(sheet.getRange("A10").getValue());
+  for (var i = 0; i < letras19.length; i++) { var col = letras19[i]; var pesoMes = parseFloatSafe(sheet.getRange(col + "3").getValue()); if (pesoMes !== "") { sheet.getRange(col + "4").setValue(pesoMes - pesoObj); } else { sheet.getRange(col + "4").setValue(""); } if (pesoMes !== "" && tallaVal !== "" && edadVal !== "") { var tmb = (10 * pesoMes) + (6.25 * (tallaVal * 100)) - (5 * edadVal) + 5; sheet.getRange(col + "19").setValue(Math.round((tmb * 1.2) - 500)); } else { sheet.getRange(col + "19").setValue(""); } }
+  
+  var filasA = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163]; var letrasA = ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']; 
+  for (var i = 0; i < filasA.length; i++) { 
+    sheet.getRange("A" + filasA[i]).setValue(sheet.getRange(letrasA[i] + "2").getValue()); 
+    var kVal = sheet.getRange("K" + filasA[i]).getValue();
+    
+    // Forzamos la escritura en el excel
+    var resultText = (c2Val instanceof Date && kVal instanceof Date) ? calcularDiferenciaMesesDias(c2Val, kVal) : "";
+    sheet.getRange("L" + filasA[i]).setValue(resultText);
+  }
+  
+  sheet.getRange("K23").setValue(today);
+  if (diarioSheet) { var pesoActualDiario = diarioSheet.getRange("B382").getValue(); sheet.getRange("K27").setValue(diarioSheet.getRange("C382").getValue()); sheet.getRange("K31").setValue(pesoActualDiario); if (calcSheet) { calcSheet.getRange("D4").setValue(pesoActualDiario); var pNum = parseFloatSafe(pesoActualDiario); if (pNum !== "" && tallaVal !== "" && tallaVal > 0) { calcSheet.getRange("D7").setValue(Math.round((pNum / (tallaVal * tallaVal)) * 10) / 10); } else { calcSheet.getRange("D7").setValue(""); } } }
+}
+
+function restaurarFormulasDiario(sheet) {
+  var ss = sheet.getParent(); var perfilSheet = ss.getSheetByName("Perfil"); var calcSheet = ss.getSheetByName("Calculadora") || ss.getSheetByName("Calculadoras"); var baseDate = new Date(perfilSheet.getRange("C2").getValue()); var pesoInicial = perfilSheet.getRange("C3").getValue(); var edadVal = perfilSheet.getRange("A4").getValue(); var edad = (edadVal !== "" && !isNaN(parseFloatSafe(edadVal))) ? parseFloatSafe(edadVal) : 30;
+  var dataFull = sheet.getRange("B2:H381").getValues(); var dates = [], diffsC = [], diffsD = [], bpResults = [], sumC = 0, lastPeso = "", lastF = "--", lastG = "--", lastH = "--";
+  function calcBP(bpStr, ed) { if (!bpStr || bpStr === "") return ""; var parts = String(bpStr).replace(/\s/g, "").split("/"); if (parts.length !== 2) return "Formato incorrecto"; var sys = parseInt(parts[0], 10), dia = parseInt(parts[1], 10); if (isNaN(sys) || isNaN(dia)) return "Formato incorrecto"; var t2_sys = (ed < 50) ? 140 : (ed < 70 ? 150 : 160); var t1_sys = (ed < 50) ? 130 : (ed < 70 ? 140 : 150); var te_sys = 120 + (Math.max(3, Math.min(8, Math.floor(ed / 10))) - 3) * 5; if (sys < 90 || dia < 60) return "Baja"; if (sys >= t2_sys || dia >= 90) return "Etapa 2 Alta"; if (sys >= t1_sys || dia >= 80) return "Alta"; if (sys >= te_sys && dia < 80) return "Elevada"; return "Normal"; }
+  for (var i = 0; i < 380; i++) { var d = new Date(baseDate); if (!isNaN(d.getTime())) { d.setDate(d.getDate() + i); dates.push([d]); } else { dates.push([""]); } var bCur = dataFull[i][0]; var pCur = parseFloatSafe(bCur); if (bCur !== "") lastPeso = bCur; if (i > 0) { if (bCur !== "" && pCur !== "") { var pPrev = parseFloatSafe(dataFull[i-1][0]); var diff = pCur - ((dataFull[i-1][0] !== "" && pPrev !== "") ? pPrev : 0); diffsC.push([diff]); sumC += diff; } else { diffsC.push([""]); } } if (bCur !== "" && pCur !== "") { var pIni = parseFloatSafe(pesoInicial); diffsD.push([pCur - ((pesoInicial !== "" && pIni !== "") ? pIni : 0)]); } else { diffsD.push([""]); } if (dataFull[i][4] !== "") lastF = dataFull[i][4]; if (dataFull[i][5] !== "") lastG = dataFull[i][5]; if (dataFull[i][6] !== "") lastH = dataFull[i][6]; bpResults.push([calcBP(dataFull[i][6], edad)]); }
+  sheet.getRange("A2:A381").setValues(dates); sheet.getRange("C3:C381").setValues(diffsC); sheet.getRange("D2:D381").setValues(diffsD); sheet.getRange("I2:I381").setValues(bpResults); sheet.getRange("B382").setValue(lastPeso); sheet.getRange("C382").setValue(sumC); sheet.getRange("F382").setValue(lastF); sheet.getRange("G382").setValue(lastG); sheet.getRange("H382").setValue(lastH); sheet.getRange("I382").setValue(calcBP(lastH !== "--" ? lastH : "", edad));
+  
+  // Balances Semanales
+  var jRows = [{ r: 10, b1: 2, b2: 9 }, { r: 17, b1: 9, b2: 16 }, { r: 24, b1: 16, b2: 23 }, { r: 31, b1: 23, b2: 30 }, { r: 38, b1: 30, b2: 37 }, { r: 45, b1: 37, b2: 44 }, { r: 52, b1: 44, b2: 51 }, { r: 59, b1: 51, b2: 58 }, { r: 66, b1: 58, b2: 65 }, { r: 73, b1: 65, b2: 72 }, { r: 80, b1: 72, b2: 79 }, { r: 87, b1: 79, b2: 86 }, { r: 95, b1: 86, b2: 93 }, { r: 101, b1: 93, b2: 100 }, { r: 108, b1: 100, b2: 107 }, { r: 115, b1: 107, b2: 114 }, { r: 122, b1: 114, b2: 121 }, { r: 129, b1: 121, b2: 128 }, { r: 136, b1: 128, b2: 135 }, { r: 143, b1: 135, b2: 142 }, { r: 150, b1: 142, b2: 149 }, { r: 157, b1: 149, b2: 156 }, { r: 164, b1: 156, b2: 163 }, { r: 171, b1: 163, b2: 170 }, { r: 178, b1: 170, b2: 177 }, { r: 185, b1: 177, b2: 184 }, { r: 192, b1: 184, b2: 191 }, { r: 199, b1: 191, b2: 198 }, { r: 206, b1: 198, b2: 205 }, { r: 213, b1: 205, b2: 212 }, { r: 220, b1: 212, b2: 219 }, { r: 227, b1: 219, b2: 226 }, { r: 234, b1: 226, b2: 233 }, { r: 241, b1: 233, b2: 240 }, { r: 248, b1: 240, b2: 247 }, { r: 255, b1: 247, b2: 254 }, { r: 262, b1: 254, b2: 261 }, { r: 269, b1: 261, b2: 268 }, { r: 276, b1: 268, b2: 275 }, { r: 283, b1: 275, b2: 282 }, { r: 290, b1: 282, b2: 289 }, { r: 297, b1: 289, b2: 296 }, { r: 304, b1: 296, b2: 303 }, { r: 311, b1: 303, b2: 310 }, { r: 318, b1: 310, b2: 317 }, { r: 325, b1: 317, b2: 324 }, { r: 332, b1: 324, b2: 331 }, { r: 339, b1: 331, b2: 338 }, { r: 346, b1: 338, b2: 345 }, { r: 353, b1: 345, b2: 352 }, { r: 360, b1: 352, b2: 359 }, { r: 368, b1: 359, b2: 366 }, { r: 374, b1: 366, b2: 373 }, { r: 381, b1: 373, b2: 380 }];
+  for (var k = 0; k < jRows.length; k++) { var map = jRows[k]; var b1Val = dataFull[map.b1 - 2][0]; var b2Val = dataFull[map.b2 - 2][0]; var val1 = parseFloatSafe(b1Val); var val2 = parseFloatSafe(b2Val); if (b1Val !== "" && b2Val !== "" && val1 !== "" && val2 !== "") { sheet.getRange("J" + map.r).setValue(val2 - val1); } else { sheet.getRange("J" + map.r).setValue(""); } }
+
+  // Balances Mensuales
+  var monthlyRows = [ { r: 34, startRow: 2, endRow: 33 }, { r: 64, startRow: 33, endRow: 63 }, { r: 96, startRow: 63, endRow: 94 }, { r: 125, startRow: 94, endRow: 124 }, { r: 158, startRow: 124, endRow: 155 }, { r: 187, startRow: 155, endRow: 186 }, { r: 215, startRow: 186, endRow: 214 }, { r: 246, startRow: 214, endRow: 245 }, { r: 277, startRow: 245, endRow: 275 }, { r: 307, startRow: 275, endRow: 306 }, { r: 337, startRow: 306, endRow: 336 }, { r: 369, startRow: 336, endRow: 367 } ];
+  for (var m = 0; m < monthlyRows.length; m++) { var mapM = monthlyRows[m]; var valStart = parseFloatSafe(dataFull[mapM.startRow - 2][0]); var valEnd = parseFloatSafe(dataFull[mapM.endRow - 2][0]); if (valStart !== "" && valEnd !== "" && !isNaN(valStart) && !isNaN(valEnd)) { var diffM = valEnd - valStart; sheet.getRange("J" + mapM.r).setValue("(BALANCE MENSUAL) = " + diffM.toFixed(2) + " Kg"); } else { sheet.getRange("J" + mapM.r).setValue(""); } }
+
+  // --- CÁLCULO DIARIO DEL DÉFICIT CALÓRICO EN BASE AL PESO ACTUAL ---
+  var pesoActualVal = parseFloatSafe(lastPeso); var deficitCalculado = "";
+  if (pesoActualVal !== "") { var tallaVal = parseFloatSafe(perfilSheet.getRange("A7").getValue()); var edadVal = parseFloatSafe(perfilSheet.getRange("A4").getValue()); if (edadVal === "" || isNaN(edadVal)) edadVal = 30; if (tallaVal !== "" && !isNaN(tallaVal) && tallaVal > 0) { var genero = calcSheet ? calcSheet.getRange("D2").getDisplayValue() : "Hombre"; var constante = (genero && genero.toLowerCase().indexOf("mujer") !== -1) ? -161 : 5; var tmb = (10 * pesoActualVal) + (6.25 * (tallaVal * 100)) - (5 * edadVal) + constante; deficitCalculado = Math.round((tmb * 1.2) - 500); } }
+  sheet.getRange("K382").setValue(deficitCalculado);
+}
+
+// ==========================================
+// FUNCIONES PRINCIPALES (LEEN SU PROPIO ARCHIVO)
+// ==========================================
+
+function getDashboardData(userId, email) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "dash_" + userId;
+  var esSuperAdmin = (userId === ADMIN_UID);
+
+  if (!esSuperAdmin) { var cachedData = cache.get(cacheKey); if (cachedData) return JSON.parse(cachedData); }
+
+  var userEnv = getUserSpreadsheet(userId, email, "");
+  var esAdminRegular = (userEnv.estado === "Admin");
+  var tieneRolAdministrador = esSuperAdmin || esAdminRegular;
+  
+  if (userEnv.estado === "Pendiente" && !tieneRolAdministrador) { return { isPendiente: true }; }
+  if (userEnv.estado === "Bloqueado" && !tieneRolAdministrador) { return { isBloqueado: true }; }
+
+  var pSheet = userEnv.ss.getSheetByName("Perfil");
+  var pRange = pSheet.getRange(1, 1, 175, 15);
+  
+  // Extraemos objetos Date nativos para el cálculo y DisplayValues para la APP
+  var pRawObjects = pRange.getValues(); 
+  var pFormulas = pRange.getFormulas();
+  var pValues = pRange.getDisplayValues();
+
+  function fastReadImage(row, col) { var f = pFormulas[row-1][col-1]; if (f && f.toUpperCase().indexOf('=IMAGE') !== -1) { var match = f.match(/=IMAGE\("([^"]+)"/i); if (match) return match[1]; } return pValues[row-1][col-1]; }
+  function fastVal(row, col) { return pValues[row-1][col-1]; }
+
+  var diarioSheet = userEnv.ss.getSheetByName("Diario"); 
+  var calcSheet = userEnv.ss.getSheetByName("Calculadora") || userEnv.ss.getSheetByName("Calculadoras");
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var recetasSheet = centralSs.getSheetByName("RECETAS") || centralSs.getSheetByName("Recetas"); 
+  var appLogoUrl = readImageUrl(centralSs.getSheetByName("DB_Perfiles"), "N2");
+
+  var DEF_ESC = "https://i.postimg.cc/XvjwD97P/Tu-foto-aqui.jpg"; var DEF_FRE = "https://i.postimg.cc/dVdHKRY5/FRENTE.jpg"; var DEF_ESP = "https://i.postimg.cc/7ZY3KgL7/ESPALDA.jpg"; var DEF_PD = "https://i.postimg.cc/CKRjgSkk/PERFIL-DERECHO.jpg"; var DEF_PI = "https://i.postimg.cc/RhLtRF5D/PERFIL-IZQUIERDO.jpg";
+
+  var nombre = fastVal(2, 1) || "Usuario";
+  var fechaReg = fastVal(2, 3);
+  var pesoInicial = fastVal(10, 1);
+  var talla = fastVal(7, 1);
+  var pesoIdeal = fastVal(13, 1); 
+  var edad = fastVal(4, 1) || 30;
+  var fechaNac = fastVal(19, 1); 
+  var pesoActual = fastVal(31, 11); 
+  var deficit = diarioSheet ? diarioSheet.getRange("K382").getDisplayValue() : fastVal(19, 3);
+  var pesoObjetivo = fastVal(16, 1);
+  var genero = calcSheet ? calcSheet.getRange("D2").getDisplayValue() : "Hombre";
+  var imcVal = calcSheet ? calcSheet.getRange("D7").getDisplayValue() : "";
+  var avatarUrl = fastReadImage(21, 1);
+  var evolucionHoy = fastVal(27, 11);
+
+  // AUTO-SANACIÓN DEL EXCEL: Si eliminaste la fórmula, el script detecta las celdas L vacías y las imprime automáticamente
+  var c2Date = pRawObjects[1][2]; // C2 Object Date
+  var filasFechas = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163]; var escalonesData = [];
+  
+  for (var i = 0; i < filasFechas.length; i++) { 
+    var filaF = filasFechas[i]; 
+    var escUrl = fastReadImage(34 + (i * 11), 14); 
+    
+    var kDateObj = pRawObjects[filaF - 1][10]; // Columna K (índice 10)
+    var lValorActual = pRawObjects[filaF - 1][11]; // Columna L (índice 11)
+
+    var diasFormateados = "";
+    if (c2Date instanceof Date && kDateObj instanceof Date) {
+      diasFormateados = calcularDiferenciaMesesDias(c2Date, kDateObj);
+    }
+    
+    // Si la celda en Excel está vacía o distinta, la re-escribimos directamente en el Spreadsheet
+    if (diasFormateados !== "" && lValorActual !== diasFormateados) {
+       pSheet.getRange("L" + filaF).setValue(diasFormateados);
+    }
+
+    escalonesData.push({ 
+      estado: fastVal(filaF - 4, 11), 
+      fecha: fastVal(filaF, 11), 
+      dias: diasFormateados || lValorActual, 
+      foto: (escUrl && escUrl.toString().startsWith("http")) ? escUrl : DEF_ESC 
+    }); 
+  }
+
+  var medidasMatriz = pSheet.getRange("C2:N18").getDisplayValues(); var mesesData = [];
+  for (var m = 1; m <= 12; m++) { var cI = m - 1; var fFM = 23 + ((m - 1) * 11); var uF = fastReadImage(fFM, 2); var uE = fastReadImage(fFM, 4); var uPD = fastReadImage(fFM, 6); var uPI = fastReadImage(fFM, 8); mesesData.push({ mes: m, fechaMed: medidasMatriz[0][cI], pesoColB: medidasMatriz[1][cI], difObj: medidasMatriz[2][cI], med: { cuello: medidasMatriz[3][cI], hombro: medidasMatriz[4][cI], pecho: medidasMatriz[5][cI], cintura: medidasMatriz[6][cI], brazoI: medidasMatriz[7][cI], brazoD: medidasMatriz[8][cI], anteI: medidasMatriz[9][cI], anteD: medidasMatriz[10][cI], circAb: medidasMatriz[11][cI], musloI: medidasMatriz[12][cI], musloD: medidasMatriz[13][cI], pantI: medidasMatriz[14][cI], pantD: medidasMatriz[15][cI], cadera: medidasMatriz[16][cI] }, fotos: { frente: (uF && uF.toString().startsWith("http")) ? uF : DEF_FRE, espalda: (uE && uE.toString().startsWith("http")) ? uE : DEF_ESP, perfilDer: (uPD && uPD.toString().startsWith("http")) ? uPD : DEF_PD, perfilIzq: (uPI && uPI.toString().startsWith("http")) ? uPI : DEF_PI } }); }
+
+  var diarioDataList = []; 
+  if (diarioSheet) {
+    var lastRowD = Math.min(diarioSheet.getLastRow(), 381);
+    if (lastRowD >= 2) { 
+      var dValues = diarioSheet.getRange(2, 1, lastRowD - 1, 11).getDisplayValues(); 
+      for (var d = 0; d < dValues.length; d++) { 
+        diarioDataList.push({ fila: d + 2, fecha: dValues[d][0], peso: dValues[d][1], dif: dValues[d][2], progreso: dValues[d][3], energia: dValues[d][4], caminata: dValues[d][5], agua: dValues[d][6], presion: dValues[d][7], presionStat: dValues[d][8], notas: dValues[d][9] }); 
+      } 
+    } 
+  }
+
+  var fotosCalc = { img1: "", img2: "", img3: "", img4: "", img5: "" };
+  if (calcSheet) { 
+    fotosCalc.img1 = readImageUrl(calcSheet, "B2"); 
+    fotosCalc.img2 = readImageUrl(calcSheet, "E1"); 
+    fotosCalc.img3 = readImageUrl(calcSheet, "F1"); 
+    fotosCalc.img4 = readImageUrl(calcSheet, "G13"); 
+    fotosCalc.img5 = readImageUrl(calcSheet, "G1"); 
+  }
+
+  var recetasList = [];
+  if (recetasSheet) { var lastRowR = recetasSheet.getLastRow(); if (lastRowR > 1) { var recRaw = recetasSheet.getRange(2, 1, lastRowR - 1, 6).getDisplayValues(); var recFormulas = recetasSheet.getRange(2, 6, lastRowR - 1, 1).getFormulas(); for(var r = 0; r < recRaw.length; r++) { if(!recRaw[r][0]) continue; var picUrl = recRaw[r][5]; var form = recFormulas[r][0]; if (form && form.toUpperCase().indexOf('=IMAGE') !== -1) { var match = form.match(/=IMAGE\("([^"]+)"/i); if (match) picUrl = match[1]; } recetasList.push({ fila: r + 2, nombre: recRaw[r][0], categoria: (recRaw[r][1] || "").toUpperCase().trim(), calorias: recRaw[r][2], ingredientes: recRaw[r][3], preparacion: recRaw[r][4], fotoRaw: picUrl }); } } }
+
+  var estadoSheet = centralSs.getSheetByName("FINANZAS_ESTADO");
+  var pagosSheet = centralSs.getSheetByName("FINANZAS_PAGOS");
+  var finanzasUser = { plan: "Sin plan", proximo: "--", estado: "Sin registro" };
+  var historialPagos = [];
+  var hoyF = new Date(); hoyF.setHours(0,0,0,0);
+
+  if (estadoSheet) {
+    var eData = estadoSheet.getDataRange().getValues();
+    for (var e = 1; e < eData.length; e++) {
+      if (eData[e][0] === userId) {
+        finanzasUser.plan = eData[e][2] || "Sin plan";
+        var fProx = eData[e][3];
+        if (fProx && fProx instanceof Date) {
+          finanzasUser.proximo = Utilities.formatDate(fProx, "GMT-4", "dd/MM/yyyy");
+          finanzasUser.estado = (fProx < hoyF) ? "VENCIDO" : "AL DÍA";
+        }
+        break;
+      }
+    }
+  }
+  
+  if (pagosSheet) {
+    var pData = pagosSheet.getRange("A2:I" + Math.max(2, pagosSheet.getLastRow())).getDisplayValues();
+    for (var p = 0; p < pData.length; p++) {
+      if (pData[p][0] === userId) { historialPagos.push({ fecha: (pData[p][2]||"").substring(0,10), periodo: pData[p][3] + " " + pData[p][4], plan: pData[p][5], metodo: pData[p][6], recibo: pData[p][7], costo: pData[p][8] || "" }); }
+    }
+    historialPagos.reverse(); 
+  }
+
+  var responsePayload = { 
+    nombre: nombre, fechaReg: fechaReg, pesoInicial: pesoInicial, talla: talla, pesoIdeal: pesoIdeal, edad: edad, 
+    fechaNac: fechaNac, peso: pesoActual, deficit: deficit, pesoObjetivo: pesoObjetivo, genero: genero, imc: imcVal, 
+    evolucion: evolucionHoy, escalones: escalonesData, meses: mesesData, diario: diarioDataList, calcFotos: fotosCalc, 
+    recetas: recetasList, 
+    presionActual: diarioSheet ? diarioSheet.getRange("H382").getDisplayValue() : "", 
+    presionEstado: diarioSheet ? diarioSheet.getRange("I382").getDisplayValue() : "", 
+    ultimaCaminata: diarioSheet ? diarioSheet.getRange("F382").getDisplayValue() : "", 
+    ultimoAgua: diarioSheet ? diarioSheet.getRange("G382").getDisplayValue() : "", 
+    avatarUrl: avatarUrl, appLogoUrl: appLogoUrl, isAdmin: tieneRolAdministrador, 
+    isSuperAdmin: esSuperAdmin, finanzasCli: finanzasUser, historialPagos: historialPagos 
+  };
+
+  try { if (!esSuperAdmin) { var jsonStr = JSON.stringify(responsePayload); if (jsonStr.length < 90000) { cache.put(cacheKey, jsonStr, 300); } } } catch (errCache) {}
+  return responsePayload;
+}
+
+function saveWelcomeData(datos, userId) {
+  var userEnv = getUserSpreadsheet(userId, null, datos.nombre); var sheet = userEnv.ss.getSheetByName("Perfil"); var calcSheet = userEnv.ss.getSheetByName("Calculadora") || userEnv.ss.getSheetByName("Calculadoras");
+  if (datos.nombre) sheet.getRange("A2").setValue(datos.nombre); if (datos.fechaReg) sheet.getRange("C2").setValue(datos.fechaReg); if (datos.fecha) sheet.getRange("A19").setValue(datos.fecha); if (datos.pesoIni) sheet.getRange("A10").setValue(parseFloatSafe(datos.pesoIni));
+  var tallaNum = parseFloatSafe(datos.talla); if (tallaNum !== "") { sheet.getRange("A7").setValue(tallaNum); if (calcSheet) calcSheet.getRange("D3").setValue(tallaNum); }
+  if (datos.pesoObj !== undefined) sheet.getRange("A16").setValue(parseFloatSafe(datos.pesoObj)); 
+  if (datos.avatarUrl !== undefined) writeImageUrl(sheet, "A21", datos.avatarUrl); 
+  var generoUser = datos.genero || "Hombre"; if (datos.genero && calcSheet) calcSheet.getRange("D2").setValue(generoUser);
+  if (tallaNum !== "" && calcSheet) { var tallaCm = tallaNum * 100; var pesoIdealCalc = (generoUser === 'Hombre') ? (tallaCm - 100 - ((tallaCm - 150) / 4)) : (tallaCm - 100 - ((tallaCm - 150) / 2.5)); var pIdArr = Math.round(pesoIdealCalc * 10) / 10; calcSheet.getRange("D6").setValue(pIdArr); sheet.getRange("A13").setValue(pIdArr); }
+  restaurarFormulasPerfil(sheet); actualizarDBPerfiles(userId, sheet, datos.nombre); CacheService.getScriptCache().remove("dash_" + userId);
+  return "¡Perfil configurado!";
+}
+
+function guardarEscalon(payload, userId) { 
+  var userEnv = getUserSpreadsheet(userId); 
+  var sheet = userEnv.ss.getSheetByName("Perfil"); 
+  var filasFechas = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163]; 
+  var index = payload.numero - 1;
+  
+  sheet.getRange("K" + (filasFechas[index] - 4)).setValue(payload.estado); 
+  sheet.getRange("K" + filasFechas[index]).setValue(payload.fecha); 
+  
+  // Imprimir físicamente en Excel la diferencia en columna L
+  SpreadsheetApp.flush(); 
+  var c2Val = sheet.getRange("C2").getValue();
+  var kVal = sheet.getRange("K" + filasFechas[index]).getValue();
+  
+  if (c2Val instanceof Date && kVal instanceof Date) {
+    sheet.getRange("L" + filasFechas[index]).setValue(calcularDiferenciaMesesDias(c2Val, kVal));
+  } else {
+    sheet.getRange("L" + filasFechas[index]).setValue("");
+  }
+  
+  CacheService.getScriptCache().remove("dash_" + userId); 
+  return "Guardado"; 
+}
+
+function guardarFotoEscalonBackend(payload, userId) { var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Perfil"); writeImageUrl(sheet, "N" + (34 + (payload.numero - 1) * 11), payload.url); CacheService.getScriptCache().remove("dash_" + userId); return "Foto guardada"; }
+function saveMedidasMesUniversal(payload, userId) { var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Perfil"); var colLetra = String.fromCharCode(66 + payload.mes); sheet.getRange(colLetra + "2").setValue(payload.fechaMed || ""); sheet.getRange(colLetra + "3").setValue(parseFloatSafe(payload.pesoColB)); sheet.getRange(colLetra + "4").setValue(parseFloatSafe(payload.difObj)); sheet.getRange(colLetra + "5").setValue(parseFloatSafe(payload.cuello)); sheet.getRange(colLetra + "6").setValue(parseFloatSafe(payload.hombro)); sheet.getRange(colLetra + "7").setValue(parseFloatSafe(payload.pecho)); sheet.getRange(colLetra + "8").setValue(parseFloatSafe(payload.cintura)); sheet.getRange(colLetra + "9").setValue(parseFloatSafe(payload.brazoI)); sheet.getRange(colLetra + "10").setValue(parseFloatSafe(payload.anteI)); sheet.getRange(colLetra + "11").setValue(parseFloatSafe(payload.anteD)); sheet.getRange(colLetra + "12").setValue(parseFloatSafe(payload.circAb)); sheet.getRange(colLetra + "13").setValue(parseFloatSafe(payload.musloI)); sheet.getRange(colLetra + "14").setValue(parseFloatSafe(payload.musloD)); sheet.getRange(colLetra + "15").setValue(parseFloatSafe(payload.pantI)); sheet.getRange(colLetra + "16").setValue(parseFloatSafe(payload.cadera)); var fM = 23 + ((payload.mes - 1) * 11); writeImageUrl(sheet, "B" + fM, payload.fotoFrente); writeImageUrl(sheet, "D" + fM, payload.fotoEspalda); writeImageUrl(sheet, "F" + fM, payload.fotoPerfilDer); writeImageUrl(sheet, "H" + fM, payload.fotoPerfilIzq); restaurarFormulasPerfil(sheet); CacheService.getScriptCache().remove("dash_" + userId); return "Medidas actualizadas"; }
+function saveDiaDiario(datos, userId) { var userEnv = getUserSpreadsheet(userId); var sheet = userEnv.ss.getSheetByName("Diario"); var pSheet = userEnv.ss.getSheetByName("Perfil"); var filaNum = parseInt(datos.fila, 10); var rB = parseFloatSafe(datos.peso); sheet.getRange(filaNum, 2).setValue(rB !== "" ? rB : ""); sheet.getRange(filaNum, 5).setValue(datos.energia || ""); sheet.getRange(filaNum, 6).setValue(datos.caminata || ""); sheet.getRange(filaNum, 7).setValue(datos.agua || ""); sheet.getRange(filaNum, 8).setValue((datos.presion || "").toString().replace(/mmhg/gi, '').replace(/\s+/g, '')); if (!sheet.getRange(filaNum, 10).getFormula()) { sheet.getRange(filaNum, 10).setValue(datos.notas || ""); } SpreadsheetApp.flush(); restaurarFormulasDiario(sheet); restaurarFormulasPerfil(pSheet); actualizarDBPerfiles(userId, pSheet); CacheService.getScriptCache().remove("dash_" + userId); return "Día actualizado correctamente"; }
+function guardarFotosCalculadora(datos) { var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Calculadora") || SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Calculadoras"); if(sheet) { writeImageUrl(sheet, "B2", datos.img1); writeImageUrl(sheet, "E1", datos.img2); writeImageUrl(sheet, "F1", datos.img3); writeImageUrl(sheet, "G13", datos.img4); writeImageUrl(sheet, "G1", datos.img5); return "Fotos guardadas"; } }
+function saveRecetaBackend(datos) { var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RECETAS") || SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Recetas"); var row = datos.fila ? parseInt(datos.fila) : (sheet.getLastRow() + 1); sheet.getRange(row, 1).setValue(datos.nombre); sheet.getRange(row, 2).setValue(datos.categoria); sheet.getRange(row, 3).setValue(datos.calorias); sheet.getRange(row, 4).setValue(datos.ingredientes); sheet.getRange(row, 5).setValue(datos.preparacion); writeImageUrl(sheet, "F" + row, datos.foto); return "Receta guardada"; }
+function actualizarIconoApp(url) { writeImageUrl(SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"), "N2", url); return "Ícono actualizado"; }
+function getUsersList() { var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"); var data = dbSheet.getRange("A2:Q" + Math.max(2, dbSheet.getLastRow())).getDisplayValues(); var users = []; for(var i=0; i<data.length; i++){ if(data[i][0] !== "") { users.push({ uid: data[i][0], nombre: data[i][1], estado: data[i][14] || "Autorizado", email: data[i][15] || "Sin correo", sheetId: data[i][16] }); } } return users; }
+function cambiarEstadoUser(uid, estado) { var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"); var uids = dbSheet.getRange("A2:A").getValues(); for (var i = 0; i < uids.length; i++) { if (uids[i][0] == uid) { dbSheet.getRange(i + 2, 15).setValue(estado); CacheService.getScriptCache().remove("dash_" + uid); return "Estado actualizado"; } } }
+function eliminarUser(uid) { var ss = SpreadsheetApp.getActiveSpreadsheet(); var dbSheet = ss.getSheetByName("DB_Perfiles"); var uids = dbSheet.getRange("A2:A").getValues(); for (var i = 0; i < uids.length; i++) { if (uids[i][0] == uid) { var sheetId = dbSheet.getRange(i+2, 17).getValue(); if(sheetId) { try { DriveApp.getFileById(sheetId).setTrashed(true); } catch(e){} } dbSheet.deleteRow(i + 2); CacheService.getScriptCache().remove("dash_" + uid); return "Usuario eliminado"; } } }
+
+function getFinanzasData() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var dbSheet = ss.getSheetByName("DB_Perfiles");
+  var usersData = dbSheet.getRange("A2:B" + Math.max(2, dbSheet.getLastRow())).getValues();
+  var estadoSheet = ss.getSheetByName("FINANZAS_ESTADO");
+  var estadoData = estadoSheet ? estadoSheet.getRange("A2:D" + Math.max(2, estadoSheet.getLastRow())).getValues() : [];
+  var estadosMap = {};
+  for(var i = 0; i < estadoData.length; i++) { if(estadoData[i][0]) estadosMap[estadoData[i][0]] = { base: estadoData[i][1], plan: estadoData[i][2], proximo: estadoData[i][3] }; }
+  var pagosSheet = ss.getSheetByName("FINANZAS_PAGOS");
+  var pagosData = pagosSheet ? pagosSheet.getRange("A2:I" + Math.max(2, pagosSheet.getLastRow())).getDisplayValues() : [];
+  var usuarios = []; var alertas = []; var hoy = new Date(); hoy.setHours(0,0,0,0); var limiteAlerta = new Date(hoy); limiteAlerta.setDate(limiteAlerta.getDate() + 5);
+  for(var j = 0; j < usersData.length; j++) {
+    var uid = usersData[j][0]; if(!uid) continue;
+    var nombre = usersData[j][1] || "Sin Nombre"; var est = estadosMap[uid] || { base: "", plan: "Mensual", proximo: "" };
+    usuarios.push({ uid: uid, nombre: nombre, base: est.base ? Utilities.formatDate(new Date(est.base), "GMT-4", "yyyy-MM-dd") : "", plan: est.plan, proximo: est.proximo ? Utilities.formatDate(new Date(est.proximo), "GMT-4", "dd/MM/yyyy") : "Sin pagos" });
+    if(est.proximo && est.proximo instanceof Date) { var fProx = new Date(est.proximo); if(fProx < hoy) alertas.push({ nombre: nombre, fecha: Utilities.formatDate(fProx, "GMT-4", "dd/MM/yyyy"), estado: "VENCIDO" }); else if(fProx <= limiteAlerta) alertas.push({ nombre: nombre, fecha: Utilities.formatDate(fProx, "GMT-4", "dd/MM/yyyy"), estado: "PRÓXIMO A VENCER" }); }
+  }
+  var pagosConFila = [];
+  for(var p = 0; p < pagosData.length; p++) { if(pagosData[p][0]) { pagosConFila.push({ fila: p + 2, uid: pagosData[p][0], nombre: pagosData[p][1], fechaPago: pagosData[p][2], mes: pagosData[p][3], anio: pagosData[p][4], plan: pagosData[p][5], metodo: pagosData[p][6], recibo: pagosData[p][7], costo: pagosData[p][8] || "" }); } }
+  pagosConFila.reverse(); usuarios.sort(function(a, b) { return a.nombre.localeCompare(b.nombre); });
+  return { usuarios: usuarios, alertas: alertas, pagos: pagosConFila };
+}
+
+function registrarPago(payload) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var pagosSheet = ss.getSheetByName("FINANZAS_PAGOS");
+  var estadoSheet = ss.getSheetByName("FINANZAS_ESTADO");
+  pagosSheet.appendRow([payload.uid, payload.nombre, new Date(), payload.mes, payload.anio, payload.plan, payload.metodo, payload.comprobante, payload.costo]);
+  var estData = estadoSheet.getRange("A2:A" + Math.max(2, estadoSheet.getLastRow())).getValues();
+  var fila = -1;
+  for(var i = 0; i < estData.length; i++) { if(estData[i][0] == payload.uid) { fila = i + 2; break; } }
+  var fBaseParts = payload.fechaBase.split('-'); var fBase = new Date(fBaseParts[0], fBaseParts[1] - 1, fBaseParts[2]);
+  var mesesArray = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"];
+  var mesIndex = mesesArray.indexOf(payload.mes); 
+  var fProximo;
+  if (payload.plan === "Anual") { fProximo = new Date(parseInt(payload.anio) + 1, mesIndex, fBase.getDate()); } else { fProximo = new Date(parseInt(payload.anio), mesIndex + 1, fBase.getDate()); }
+  if(fila === -1) { fila = estadoSheet.getLastRow() + 1; estadoSheet.getRange(fila, 1, 1, 4).setValues([[payload.uid, fBase, payload.plan, fProximo]]); } else { estadoSheet.getRange(fila, 2, 1, 3).setValues([[fBase, payload.plan, fProximo]]); }
+  return "Pago sincronizado con éxito";
+}
+
+function eliminarPago(payload) { SpreadsheetApp.getActiveSpreadsheet().getSheetByName("FINANZAS_PAGOS").deleteRow(payload.fila); return "Pago eliminado"; }
+function editarPagoBackend(payload) { var ss = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("FINANZAS_PAGOS"); var fParts = payload.fechaPago.split('-'); var fObj = fParts.length === 3 ? new Date(fParts[0], fParts[1] - 1, fParts[2]) : new Date(); ss.getRange(payload.fila, 3, 1, 7).setValues([[fObj, payload.mes, payload.anio, payload.plan, payload.metodo, payload.recibo, payload.costo]]); return "Actualizado"; }
+
+// ==========================================
+// MÓDULOS DE CONTROL SAAS Y REPORTES INTEGRADOS
+// ==========================================
+
+function obtenerDatosControlSaaS() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+    if (!hojaSaaS) {
+      hojaSaaS = ss.insertSheet("CONTROL_SAAS");
+      hojaSaaS.appendRow(["CONTROL DE SUSCRIPCIONES SAAS Y MEMBRESÍAS"]);
+      hojaSaaS.appendRow(["PLAN / SERVICIO", "CORREO USUARIO", "MONTO", "COBRADO", "FECHA DE SUSCRIPCION", "FECHA DE PAGO", "VENCE HOY", "VENCIDO 7 DÍAS", "VENCIDO 15 DÍAS", "COMPROBANTE", "MES", "AÑO", "MÉTODO"]);
+    }
+    var dbSheet = ss.getSheetByName("DB_Perfiles");
+    var correos = [];
+    if (dbSheet) {
+      var dataU = dbSheet.getDataRange().getValues();
+      for (var i = 1; i < dataU.length; i++) {
+        if (dataU[i][15] && dataU[i][15] !== "") correos.push(dataU[i][15]);
+      }
+    }
+    var uF = hojaSaaS.getLastRow();
+    var cursos = [];
+    if (uF >= 3) {
+      cursos = hojaSaaS.getRange(3, 1, uF - 2, 13).getValues().map(function(f) { 
+        return f.map(function(c) { return (c instanceof Date) ? Utilities.formatDate(c, Session.getScriptTimeZone(), "yyyy-MM-dd") : c; });
+      });
+    }
+    return { cursos: cursos, clientes: correos };
+  } catch (e) { return { error: e.toString() }; }
+}
+
+function guardarCambioControlSaaS(index, tipo, valor) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+    var fila = parseInt(index) + 3;
+    var columnas = { 'curso': 1, 'cliente': 2, 'monto': 3, 'cobrado': 4, 'fecha_suscripcion': 5, 'fecha_pago': 6, 'comprobante': 10, 'mes': 11, 'anio': 12, 'metodo': 13 };
+    
+    if (columnas[tipo]) {
+      if (valor === "" && ['fecha_suscripcion', 'fecha_pago'].includes(tipo)) {
+         hojaSaaS.getRange(fila, columnas[tipo]).clearContent();
+      } else {
+         hojaSaaS.getRange(fila, columnas[tipo]).setValue(valor);
+      }
+
+      if (tipo === 'cobrado' && valor === true) {
+        var fechaHoy = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+        if (!hojaSaaS.getRange(fila, 6).getValue()) { hojaSaaS.getRange(fila, 6).setValue(fechaHoy); }
+      }
+
+      if (['cobrado', 'fecha_pago', 'cliente'].includes(tipo)) { actualizarEstadosVencimientoSaaS(); }
+      return "Guardado";
+    }
+    return "Atributo no encontrado";
+  } catch (e) { return "Error: " + e.toString(); }
+}
+
+function generarSiguienteMesSaaS(index, nuevoMonto) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+    var filaOriginal = parseInt(index) + 3;
+    
+    var cursoServicio = hojaSaaS.getRange(filaOriginal, 1).getValue();
+    var cliente = hojaSaaS.getRange(filaOriginal, 2).getValue();
+    var monto = nuevoMonto || hojaSaaS.getRange(filaOriginal, 3).getValue();
+    var fechaSuscripcion = hojaSaaS.getRange(filaOriginal, 5).getValue();
+    var fechaPagoAnterior = hojaSaaS.getRange(filaOriginal, 6).getValue();
+    var metodoAnterior = hojaSaaS.getRange(filaOriginal, 13).getValue();
+    
+    var nuevaFecha = new Date();
+    if (fechaPagoAnterior instanceof Date) {
+      nuevaFecha = new Date(fechaPagoAnterior);
+    } else if (typeof fechaPagoAnterior === 'string' && fechaPagoAnterior.trim() !== '') {
+      var parts = fechaPagoAnterior.split('-');
+      if(parts.length===3) nuevaFecha = new Date(parts[0], parts[1]-1, parts[2]);
+    } else if (fechaSuscripcion instanceof Date) {
+      nuevaFecha = new Date(fechaSuscripcion);
+    }
+    
+    nuevaFecha.setMonth(nuevaFecha.getMonth() + 1);
+    var nuevaFechaStr = Utilities.formatDate(nuevaFecha, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    var fechaSuscripcionStr = (fechaSuscripcion instanceof Date) ? Utilities.formatDate(fechaSuscripcion, Session.getScriptTimeZone(), "yyyy-MM-dd") : fechaSuscripcion;
+
+    hojaSaaS.appendRow([cursoServicio, cliente, monto, false, fechaSuscripcionStr, nuevaFechaStr, "", "", "", "", "", "", metodoAnterior]);
+    return "Siguiente mes generado";
+  } catch(e) { return "Error: " + e.toString(); }
+}
+
+function eliminarRegistroSaaS(index) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+    hojaSaaS.deleteRow(parseInt(index) + 3);
+    return "Registro eliminado";
+  } catch(e) { return "Error: " + e.toString(); }
+}
+
+function actualizarEstadosVencimientoSaaS() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+  if (!hojaSaaS) return;
+  var uF = hojaSaaS.getLastRow();
+  if (uF < 3) return;
+
+  var rango = hojaSaaS.getRange(3, 1, uF - 2, 10);
+  var datos = rango.getValues();
+  var hoy = new Date();
+  hoy.setHours(0,0,0,0);
+  var nuevosEstados = [];
+
+  for (var i = 0; i < datos.length; i++) {
+    var fila = datos[i]; var cobrado = fila[3]; var fechaPago = fila[5]; var estK = fila[6]; var estL = fila[7]; var estM = fila[8]; 
+
+    if (fechaPago instanceof Date && cobrado !== true) {
+      var fechaComp = new Date(fechaPago);
+      fechaComp.setHours(0,0,0,0);
+      var difDias = Math.floor((hoy - fechaComp) / (1000 * 60 * 60 * 24));
+
+      if (difDias >= 0 && (estK === "" || estK === null)) estK = "VENCIDO";
+      if (difDias >= 7 && (estL === "" || estL === null)) estL = "VENCIDO 7D";
+      if (difDias >= 15 && (estM === "" || estM === null)) estM = "VENCIDO 15D";
+    }
+
+    if (cobrado === true) {
+      if (estK.toString().includes("VENCIDO")) estK = "";
+      if (estL.toString().includes("VENCIDO")) estL = "";
+      if (estM.toString().includes("VENCIDO")) estM = "";
+    }
+    nuevosEstados.push([estK, estL, estM]);
+  }
+  hojaSaaS.getRange(3, 7, nuevosEstados.length, 3).setValues(nuevosEstados);
+}
+
+function ejecutarEnvioCobroSaaS() {
+  actualizarEstadosVencimientoSaaS();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+  var hojaScripts = ss.getSheetByName("SCRIPTS DE COBRO");
+  if (!hojaSaaS || !hojaScripts) return "No se encontraron las tablas base.";
+
+  var datos = hojaSaaS.getDataRange().getValues();
+  var scripts = [
+    hojaScripts.getRange("B6").getValue(),
+    hojaScripts.getRange("B14").getValue(),
+    hojaScripts.getRange("B22").getValue()
+  ];
+  var conteo = 0;
+
+  for (var i = 2; i < datos.length; i++) {
+    var fila = datos[i]; var msgIndex = -1; var colARecordar = -1;
+    if (fila[6] === "ENVIAR" || fila[6] === "VENCIDO") { msgIndex = 0; colARecordar = 7; }
+    else if (fila[7] === "ENVIAR 7D" || fila[7] === "VENCIDO 7D") { msgIndex = 1; colARecordar = 8; }
+    else if (fila[8] === "ENVIAR 15D" || fila[8] === "VENCIDO 15D") { msgIndex = 2; colARecordar = 9; }
+
+    if (msgIndex !== -1 && scripts[msgIndex]) {
+      var email = fila[1] ? fila[1].toString().trim() : "";
+      if (email && email.includes("@")) {
+        var cuerpo = scripts[msgIndex].replace("[Nombre]", email).replace("[Proyecto]", fila[0]).replace("[Monto]", fila[2]);
+        try {
+          MailApp.sendEmail(email, "⚠️ Recordatorio de Pago SaaS: " + (fila[0] || "Suscripción"), cuerpo);
+          hojaSaaS.getRange(i + 1, colARecordar).setValue("ENVIADO");
+          conteo++;
+        } catch (e) { Logger.log("Error envío SaaS: " + e.message); }
+      }
+    }
+  }
+  return "Se enviaron " + conteo + " recordatorios de cobro SaaS.";
+}
+
+function obtenerDatosReporteAnualSaaS(anio) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+    var mesesTotales = new Array(12).fill(0);
+    var totalAnio = 0;
+
+    if (hojaSaaS && hojaSaaS.getLastRow() >= 3) {
+      var datosC = hojaSaaS.getRange(3, 1, hojaSaaS.getLastRow() - 2, 6).getValues();
+      datosC.forEach(function(fila) {
+        var monto = parseFloat(fila[2]) || 0;
+        var cobrado = (fila[3] === true || fila[3].toString().toUpperCase() === "TRUE");
+        var fecha = fila[5]; 
+        if (cobrado && fecha instanceof Date && !isNaN(fecha)) {
+          if (fecha.getFullYear() == anio) {
+            mesesTotales[fecha.getMonth()] += monto;
+            totalAnio += monto;
+          }
+        }
+      });
+    }
+    return { meses: mesesTotales, total: totalAnio };
+  } catch(e) { return { error: e.toString() }; }
+}
+
+function obtenerDatosReporteClientesSaaS(anio, mesTexto) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaSaaS = ss.getSheetByName("CONTROL_SAAS");
+    var mesesArray = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+    var mesIndex = mesesArray.indexOf(mesTexto.toUpperCase());
+    var clientesMap = {};
+
+    if (hojaSaaS && hojaSaaS.getLastRow() >= 3) {
+      var datosC = hojaSaaS.getRange(3, 1, hojaSaaS.getLastRow() - 2, 6).getValues();
+      datosC.forEach(function(fila) {
+        var cliente = fila[1] || "Sin Usuario";
+        var monto = parseFloat(fila[2]) || 0;
+        var cobrado = (fila[3] === true || fila[3].toString().toUpperCase() === "TRUE");
+        var fecha = fila[5]; 
+        if (cobrado && fecha instanceof Date && !isNaN(fecha)) {
+          if (fecha.getFullYear() == anio && fecha.getMonth() == mesIndex) {
+            if(!clientesMap[cliente]) clientesMap[cliente] = 0;
+            clientesMap[cliente] += monto;
+          }
+        }
+      });
+    }
+    return { labels: Object.keys(clientesMap), valores: Object.values(clientesMap) };
+  } catch(e) { return { error: e.toString() }; }
+}
+
+function obtenerScripts() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hoja = ss.getSheetByName("SCRIPTS DE COBRO");
+    if (!hoja) {
+      hoja = ss.insertSheet("SCRIPTS DE COBRO");
+      hoja.getRange("B5").setValue("RECORDATORIO VENCE HOY");
+      hoja.getRange("B6").setValue("Hola [Nombre], tu suscripción [Proyecto] de $[Monto] vence hoy.");
+      hoja.getRange("B13").setValue("RECORDATORIO VENCIDO 7 DIAS");
+      hoja.getRange("B14").setValue("Hola [Nombre], tu suscripción [Proyecto] tiene 7 días de retraso.");
+      hoja.getRange("B21").setValue("RECORDATORIO VENCIDO 15 DIAS");
+      hoja.getRange("B22").setValue("Hola [Nombre], tu tu suscripción [Proyecto] ha sido suspendida.");
+    }
+    return { s0: hoja.getRange("B6").getValue(), s7: hoja.getRange("B14").getValue(), s15: hoja.getRange("B22").getValue() };
+  } catch(e) { return null; }
+}
+
+function actualizarScripts(s) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hoja = ss.getSheetByName("SCRIPTS DE COBRO");
+    if (!hoja) return "Error: Hoja no encontrada";
+    hoja.getRange("B6").setValue(s.s0);
+    hoja.getRange("B14").setValue(s.s7);
+    hoja.getRange("B22").setValue(s.s15);
+    return "Scripts guardados exitosamente";
+  } catch(e) { return "Error: " + e.toString(); }
+}
