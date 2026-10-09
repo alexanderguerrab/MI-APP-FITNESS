@@ -1,0 +1,1616 @@
+// ==========================================
+// CEREBRO (Código.gs) - Arquitectura Multi-Archivo + LockService + Carpeta Destino
+// Panel de administrador reescrito con el modelo de Control Freelancer Pro (Control Suscripciones, Finanzas, Usuarios, Reportes y Scripts de Cobro)
+// ==========================================
+
+var ADMIN_UID = "l6rkm3BVfxWNzbvVEQ5tCkwKSxM2"; // El súper admin puede asignar más roles y es el único que edita fotos de calculadoras y recetas por defecto.
+var TEMPLATE_ID = "1Cj0H0zqY6XuEXjkePPEAdPd54Ov_nTl4zvPska68x6s"; 
+var FOLDER_ID = "1nMQT8FRgu6HbAo3cGP2DXyHciZ3lQNYn"; // Carpeta en Drive para guardar las copias
+
+// ---- Seguridad / límites (NUEVO) ----
+// apiKey pública de Firebase (la misma del HTML). Se usa SOLO para validar el token de sesión del usuario en el servidor.
+var FIREBASE_API_KEY = "AIzaSyDbmz_PlxvG0EdqMTn5SVJTfvD8r_Du3gQ";
+// Si lo pones en true, los usuarios con correo/contraseña deben verificar su correo antes de usar la app (Google ya viene verificado).
+var EXIGIR_CORREO_VERIFICADO = false;
+var MAX_BODY_CHARS = 200000;          // tamaño máximo de una petición
+var MAX_ENVIOS_POR_EJECUCION = 25;    // correos de cobro por ejecución (evita bloquear el servidor y el límite de 6 min)
+
+// Filas de balance de la hoja Diario (columna J). Se usan al recalcular y para no pisar notas del usuario.
+var JROWS_BALANCE = [{ r: 10, b1: 2, b2: 9 }, { r: 17, b1: 9, b2: 16 }, { r: 24, b1: 16, b2: 23 }, { r: 31, b1: 23, b2: 30 }, { r: 38, b1: 30, b2: 37 }, { r: 45, b1: 37, b2: 44 }, { r: 52, b1: 44, b2: 51 }, { r: 59, b1: 51, b2: 58 }, { r: 66, b1: 58, b2: 65 }, { r: 73, b1: 65, b2: 72 }, { r: 80, b1: 72, b2: 79 }, { r: 87, b1: 79, b2: 86 }, { r: 95, b1: 86, b2: 93 }, { r: 101, b1: 93, b2: 100 }, { r: 108, b1: 100, b2: 107 }, { r: 115, b1: 107, b2: 114 }, { r: 122, b1: 114, b2: 121 }, { r: 129, b1: 121, b2: 128 }, { r: 136, b1: 128, b2: 135 }, { r: 143, b1: 135, b2: 142 }, { r: 150, b1: 142, b2: 149 }, { r: 157, b1: 149, b2: 156 }, { r: 164, b1: 156, b2: 163 }, { r: 171, b1: 163, b2: 170 }, { r: 178, b1: 170, b2: 177 }, { r: 185, b1: 177, b2: 184 }, { r: 192, b1: 184, b2: 191 }, { r: 199, b1: 191, b2: 198 }, { r: 206, b1: 198, b2: 205 }, { r: 213, b1: 205, b2: 212 }, { r: 220, b1: 212, b2: 219 }, { r: 227, b1: 219, b2: 226 }, { r: 234, b1: 226, b2: 233 }, { r: 241, b1: 233, b2: 240 }, { r: 248, b1: 240, b2: 247 }, { r: 255, b1: 247, b2: 254 }, { r: 262, b1: 254, b2: 261 }, { r: 269, b1: 261, b2: 268 }, { r: 276, b1: 268, b2: 275 }, { r: 283, b1: 275, b2: 282 }, { r: 290, b1: 282, b2: 289 }, { r: 297, b1: 289, b2: 296 }, { r: 304, b1: 296, b2: 303 }, { r: 311, b1: 303, b2: 310 }, { r: 318, b1: 310, b2: 317 }, { r: 325, b1: 317, b2: 324 }, { r: 332, b1: 324, b2: 331 }, { r: 339, b1: 331, b2: 338 }, { r: 346, b1: 338, b2: 345 }, { r: 353, b1: 345, b2: 352 }, { r: 360, b1: 352, b2: 359 }, { r: 368, b1: 359, b2: 366 }, { r: 374, b1: 366, b2: 373 }, { r: 381, b1: 373, b2: 380 }];
+var MROWS_BALANCE = [ { r: 34, startRow: 2, endRow: 33 }, { r: 64, startRow: 33, endRow: 63 }, { r: 96, startRow: 63, endRow: 94 }, { r: 125, startRow: 94, endRow: 124 }, { r: 158, startRow: 124, endRow: 155 }, { r: 187, startRow: 155, endRow: 186 }, { r: 215, startRow: 186, endRow: 214 }, { r: 246, startRow: 214, endRow: 245 }, { r: 277, startRow: 245, endRow: 275 }, { r: 307, startRow: 275, endRow: 306 }, { r: 337, startRow: 306, endRow: 336 }, { r: 369, startRow: 336, endRow: 367 } ];
+
+function isUserAdmin(userId) {
+  if (userId === ADMIN_UID) return true;
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var n = dbSheet.getLastRow();
+  if (n < 2) return false;
+  var data = dbSheet.getRange(2, 1, n - 1, 20).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0]) === String(userId)) { var re = leerRolEstado(data[i]); return (re.rol === "Administrador" && re.estado === "Autorizado"); }
+  }
+  return false;
+}
+
+// ==========================================
+// AUTENTICACIÓN REAL: se valida el ID token de Firebase en el servidor.
+// El uid y el correo salen del token, NUNCA de lo que mande el navegador.
+// ==========================================
+function verificarToken(idToken) {
+  if (!idToken || typeof idToken !== "string" || idToken.length < 100 || idToken.length > 4000) throw "Sesión inválida";
+  var cache = CacheService.getScriptCache();
+  var key = "tok_" + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken));
+  var hit = cache.get(key);
+  if (hit) return JSON.parse(hit);
+  var resp = UrlFetchApp.fetch("https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=" + FIREBASE_API_KEY, {
+    method: "post", contentType: "application/json", payload: JSON.stringify({ idToken: idToken }), muteHttpExceptions: true
+  });
+  if (resp.getResponseCode() !== 200) throw "Sesión inválida";
+  var users = JSON.parse(resp.getContentText()).users;
+  if (!users || !users.length || users[0].disabled) throw "Sesión inválida";
+  var u = users[0];
+  var out = { uid: String(u.localId), email: String(u.email || ""), verified: (u.emailVerified === true) };
+  cache.put(key, JSON.stringify(out), 300);
+  return out;
+}
+
+function respuestaJson(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
+
+// Solo se devuelven al cliente los mensajes pensados para él; los errores internos se registran en el log.
+function mensajeError(e) {
+  if (typeof e === "string") return e;
+  var s = String((e && e.message) ? e.message : e);
+  if (s.indexOf("Lock timeout") >= 0) return "Servidor saturado. Intenta de nuevo en unos segundos.";
+  console.error(e && e.stack ? e.stack : s);
+  return "Error interno del servidor. Intenta de nuevo.";
+}
+
+function doPost(e) {
+  var lock = null; var lockAdquirido = false;
+  try {
+    if (!e || !e.postData || !e.postData.contents) throw "Solicitud vacía";
+    if (e.postData.contents.length > MAX_BODY_CHARS) throw "Solicitud demasiado grande";
+    var data = JSON.parse(e.postData.contents);
+    var action = String(data.action || "");
+    var payload = (data.datos && typeof data.datos === "object") ? data.datos : {};
+
+    // Identidad verificada (fuera del candado para no bloquear a los demás usuarios)
+    var auth = verificarToken(data.idToken);
+    var userId = auth.uid;
+    payload.email = auth.email;                 // el correo SIEMPRE sale del token
+    payload.emailVerificado = auth.verified;
+    if (EXIGIR_CORREO_VERIFICADO && !auth.verified && userId !== ADMIN_UID) throw "Verifica tu correo electrónico para continuar. Te enviamos un enlace de verificación.";
+
+    // Camino rápido: dashboard en caché (se invalida en cada guardado), sin tomar el candado
+    if (action === "getDashboardData" && userId !== ADMIN_UID) {
+      var enCache = CacheService.getScriptCache().get("dash_" + userId);
+      if (enCache) return ContentService.createTextOutput(enCache).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    lockAdquirido = true;
+
+    var resultado = "";
+    switch (action) {
+      // MÉTODOS BÁSICOS DE USUARIO (los de escritura exigen cuenta "Autorizado" dentro de cada función)
+      case "getDashboardData": resultado = getDashboardData(userId, payload.email, payload.emailVerificado); break;
+      case "saveWelcomeData": resultado = saveWelcomeData(payload, userId); break;
+      case "guardarEscalon": resultado = guardarEscalon(payload, userId); break;
+      case "guardarFotoEscalonBackend": resultado = guardarFotoEscalonBackend(payload, userId); break;
+      case "saveMedidasMesUniversal": resultado = saveMedidasMesUniversal(payload, userId); break;
+      case "saveDiaDiario": resultado = saveDiaDiario(payload, userId); break;
+      case "registrarTelefono": resultado = registrarTelefono(payload, userId); break;
+
+      // SOLO SUPER ADMIN (Calculadoras y App)
+      case "guardarFotosCalculadora":
+        if (userId !== ADMIN_UID) throw "No autorizado. Solo Super Admin.";
+        resultado = guardarFotosCalculadora(payload); break;
+      case "saveRecetaBackend":
+        if (userId !== ADMIN_UID) throw "No autorizado. Solo Super Admin.";
+        resultado = saveRecetaBackend(payload); break;
+      case "actualizarIconoApp":
+        if (userId !== ADMIN_UID) throw "No autorizado";
+        resultado = actualizarIconoApp(payload.url); break;
+
+      // PANEL DE ADMINISTRADOR
+      case "getUsersList":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = getUsersList(); break;
+      case "actualizarUsuario":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = actualizarUsuario(payload, userId); break;
+      case "eliminarUser":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = eliminarUser(payload.uid, userId); break;
+      case "getFinanzasData":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = getFinanzasData(); break;
+      case "obtenerDatosControlSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = obtenerDatosControlSaaS(payload); break;
+      case "guardarCambioControlSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = guardarCambioControlSaaS(payload); break;
+      case "crearRegistroControlSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = crearRegistroControlSaaS(payload); break;
+      case "renovarControlSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = renovarControlSaaS(payload); break;
+      case "eliminarRegistroControlSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = eliminarRegistroControlSaaS(payload); break;
+      case "ejecutarEnvioCobroSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = ejecutarEnvioCobroSaaS(payload); break;
+      case "obtenerDatosReporteAnualSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = obtenerDatosReporteAnualSaaS(payload.anio); break;
+      case "obtenerDatosReporteClientesSaaS":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = obtenerDatosReporteClientesSaaS(payload.anio, payload.mesTexto); break;
+      case "obtenerScripts":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = obtenerScripts(); break;
+      case "actualizarScripts":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = actualizarScripts(payload); break;
+      case "obtenerRemitenteCobro":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = obtenerRemitenteCobro(); break;
+      case "guardarRemitenteCobro":
+        if (!isUserAdmin(userId)) throw "No autorizado";
+        resultado = guardarRemitenteCobro(payload); break;
+
+      default: resultado = { error: "Acción no válida" };
+    }
+
+    return respuestaJson(resultado);
+  } catch (error) {
+    return respuestaJson({ error: mensajeError(error) });
+  } finally {
+    if (lockAdquirido) lock.releaseLock();
+  }
+}
+
+function doGet(e) { return ContentService.createTextOutput("API Multi-Archivo Activa.").setMimeType(ContentService.MimeType.TEXT); }
+
+// ==========================================
+// REGISTRO DE TELÉFONO EN BD
+// ==========================================
+function registrarTelefono(payload, userId) {
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var fila = asegurarFilaUsuario(dbSheet, userId, payload.email, payload.emailVerificado);
+  var tel = limpiarTelefono(payload.telefono);
+  if (tel) escribirTelefono(dbSheet, fila, tel);   // un teléfono vacío (login con Google) ya NO borra el guardado
+  return "Teléfono guardado";
+}
+
+// ==========================================
+// ENRUTADOR MULTI-ARCHIVO (CLONACIÓN Y APERTURA)
+// ==========================================
+// ---- Utilidades de la hoja central DB_Perfiles ----
+function buscarFilaUsuario(dbSheet, userId) {
+  var n = dbSheet.getLastRow();
+  if (n < 2) return 0;
+  var ids = dbSheet.getRange(2, 1, n - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) { if (String(ids[i][0]) === String(userId)) return i + 2; }
+  return 0;
+}
+
+function limpiarTelefono(t) {
+  var s = String(t == null ? "" : t).trim();
+  if (!s) return "";
+  if (!/^\+?[\d\s\-()]{7,25}$/.test(s)) throw "Teléfono inválido. Usa solo números, espacios y el signo + (ej: +584121234567).";
+  return s;
+}
+function escribirTelefono(dbSheet, fila, tel) {
+  var c = dbSheet.getRange(fila, 18);
+  c.setNumberFormat("@");   // texto: conserva el "+" y los ceros iniciales
+  c.setValue(tel);
+}
+
+// Crea la fila del usuario si no existe (estado Pendiente) y completa el correo si falta. Devuelve el número de fila.
+function asegurarFilaUsuario(dbSheet, userId, email, verificado) {
+  if (!String(dbSheet.getRange("R1").getValue() || "")) { dbSheet.getRange("R1:T1").setValues([["TELEFONO", "FECHA REGISTRO", "ROL"]]); }
+  var correo = textoSeguro(email, 120);
+  var fila = buscarFilaUsuario(dbSheet, userId);
+  if (fila) {
+    if (correo && String(dbSheet.getRange(fila, 16).getValue() || "") === "") dbSheet.getRange(fila, 16).setValue(correo);
+    return fila;
+  }
+  // primera fila libre según la columna A (la celda N2 del ícono no cuenta)
+  var n = Math.max(2, dbSheet.getLastRow());
+  var colA = dbSheet.getRange(2, 1, n - 1, 1).getValues();
+  var ultima = 1;
+  for (var i = 0; i < colA.length; i++) { if (colA[i][0] !== "") ultima = i + 2; }
+  fila = ultima + 1;
+  var esSuper = (userId === ADMIN_UID);
+  dbSheet.getRange(fila, 1).setValue(String(userId));
+  // O estado · P correo · Q hoja · R teléfono · S fecha registro · T rol   (no se toca N)
+  dbSheet.getRange(fila, 15, 1, 6).setValues([[esSuper ? "Autorizado" : "Pendiente", correo, "", "", new Date(), esSuper ? "Administrador" : "Cliente"]]);
+  _mapaUsuarios = null;
+  if (correo && verificado === true) vincularPagosHuerfanos(correo, String(userId));
+  return fila;
+}
+
+// Pagos cobrados a un correo que todavía no estaba registrado: se enlazan cuando el usuario (verificado) se registra.
+function vincularPagosHuerfanos(correo, uid) {
+  try {
+    var hp = getHojaPagos(); var n = hp.getLastRow(); if (n < 2) return;
+    var vals = hp.getRange(2, 1, n - 1, 11).getValues(); var tocado = false;
+    for (var i = 0; i < vals.length; i++) {
+      if (!vals[i][0] && String(vals[i][10] || "").toLowerCase() === correo.toLowerCase()) { vals[i][0] = uid; tocado = true; }
+    }
+    if (tocado) { hp.getRange(2, 1, n - 1, 1).setValues(vals.map(function(r) { return [r[0]]; })); recalcularSuscripcionSaaS(correo); }
+  } catch (err) { console.error(err); }
+}
+
+// ==========================================
+// ENRUTADOR MULTI-ARCHIVO (CLONACIÓN Y APERTURA)
+// La hoja personal SOLO se clona cuando la cuenta está Autorizada (antes se clonaba para cualquier cuenta nueva).
+// El super admin trabaja en su propia copia, ya no sobre la PLANTILLA.
+// ==========================================
+function getUserSpreadsheet(userId, email, verificado) {
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var dbSheet = centralSs.getSheetByName("DB_Perfiles");
+  var fila = asegurarFilaUsuario(dbSheet, userId, email, verificado);
+  var datos = dbSheet.getRange(fila, 1, 1, 20).getValues()[0];
+  var esSuper = (userId === ADMIN_UID);
+  var re = leerRolEstado(datos);
+  var estado = esSuper ? "Autorizado" : re.estado;
+  var rol = esSuper ? "Administrador" : re.rol;
+  var sheetId = String(datos[16] || "");
+  var autorizado = (estado === "Autorizado");
+
+  var necesitaCopia = autorizado && (!sheetId || (esSuper && sheetId === TEMPLATE_ID));
+  if (necesitaCopia) {
+    try {
+      var template = DriveApp.getFileById(TEMPLATE_ID);
+      var carpeta = DriveApp.getFolderById(FOLDER_ID);
+      var etiqueta = esSuper ? "ADMIN" : String(email || userId).replace(/[^\w@.\-]/g, "");
+      var copia = template.makeCopy("Fitness Pro - " + etiqueta, carpeta);
+      sheetId = copia.getId();
+      dbSheet.getRange(fila, 17).setValue(sheetId);
+    } catch (err) {
+      console.error(err);
+      throw "No se pudo crear tu hoja de datos. Intenta de nuevo en unos minutos.";
+    }
+  }
+  var ss = (autorizado && sheetId) ? SpreadsheetApp.openById(sheetId) : null;
+  return { ss: ss, estado: estado, rol: rol, sheetId: sheetId, fila: fila };
+}
+
+// Para toda acción que escribe datos del usuario: exige cuenta Autorizada (el bloqueo ahora se aplica en el servidor).
+function getUserSpreadsheetAutorizado(userId) {
+  var env = getUserSpreadsheet(userId, null, false);
+  if (env.estado !== "Autorizado" || !env.ss) throw "Tu cuenta no está autorizada para realizar esta acción.";
+  return env;
+}
+
+function actualizarDBPerfiles(userId, pSheet, nombre) {
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var targetRow = buscarFilaUsuario(dbSheet, userId);
+  if (targetRow === 0) return;
+
+  var pesoIni = pSheet.getRange("A10").getValue();
+  var talla = pSheet.getRange("A7").getValue();
+  var pesoId = pSheet.getRange("A13").getValue();
+  var fNac = pSheet.getRange("A19").getDisplayValue();
+
+  // Sincronización del déficit calculado en K382 de la hoja Diario
+  var diarioSheet = pSheet.getParent().getSheetByName("Diario");
+  var deficit = diarioSheet ? diarioSheet.getRange("K382").getValue() : pSheet.getRange("C19").getValue();
+
+  var pObj = pSheet.getRange("A16").getValue();
+  var avatarUrl = readImageUrl(pSheet, "A21");
+  var pesoAct = pSheet.getRange("K31").getValue();
+  var evolucion = pSheet.getRange("K27").getValue();
+
+  var rowData = [[nombre || pSheet.getRange("A2").getValue(), pesoIni, talla, pesoId, fNac, deficit, pObj, avatarUrl, pesoAct, evolucion]];
+  // Todo texto que venga del usuario se neutraliza (evita que "=FORMULA" se ejecute en la hoja central)
+  rowData[0] = rowData[0].map(function(v) { return (typeof v === "string") ? celdaSegura(v) : v; });
+  dbSheet.getRange(targetRow, 2, 1, 10).setValues(rowData);
+}
+
+// ==========================================
+// FUNCIONES AUXILIARES
+// ==========================================
+function parseFloatSafe(val) { if (val === "" || val === undefined || val === null) return ""; var str = String(val).replace(',', '.'); var num = parseFloat(str); return isNaN(num) ? "" : num; }
+function readImageUrl(sheet, cellStr) { var formula = sheet.getRange(cellStr).getFormula(); if (formula && formula.toUpperCase().indexOf('=IMAGE') !== -1) { var match = formula.match(/=IMAGE\("([^"]+)"/i); if (match) return match[1]; } return sheet.getRange(cellStr).getDisplayValue(); }
+function writeImageUrl(sheet, cellStr, url) {
+  var range = sheet.getRange(cellStr);
+  var u = String(url == null ? "" : url).trim();
+  if (!u) { range.clearContent(); return; }
+  if (!/^https?:\/\//i.test(u) || u.length > 2000) throw "El enlace de la imagen no es válido (debe iniciar con http:// o https://).";
+  var directUrl = u;
+  var match = u.match(/drive\.google\.com\/(?:file\/d\/|open\?id=)([-_a-zA-Z0-9]+)/);
+  if (match && match[1]) { directUrl = "https://drive.google.com/thumbnail?id=" + match[1] + "&sz=w1000"; }
+  // Se codifican comillas, espacios y barras: la URL no puede "salirse" de la fórmula =IMAGE("...")
+  directUrl = directUrl.replace(/"/g, "%22").replace(/\s/g, "%20").replace(/\\/g, "%5C");
+  range.setFormula('=IMAGE("' + directUrl + '")');
+}
+
+// ---- Saneamiento de entradas (NUEVO) ----
+// Evita la inyección de fórmulas: un texto que empieza por = + - @ se guarda como texto literal.
+function celdaSegura(v) { v = (v == null) ? "" : String(v); return /^[=+\-@]/.test(v) ? "'" + v : v; }
+function textoSeguro(v, max) {
+  var s = (v == null) ? "" : String(v);
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").trim();
+  if (max && s.length > max) s = s.substring(0, max);
+  return celdaSegura(s);
+}
+function round2(x) { return Math.round(x * 100) / 100; }
+
+// Acepta DD/MM/AAAA o AAAA-MM-DD y devuelve un Date real (sin ambigüedad de idioma de la hoja) o "".
+function parseFechaEntrada(v) {
+  if (v instanceof Date) return isNaN(v.getTime()) ? "" : v;
+  var s = String(v == null ? "" : v).trim();
+  if (!s) return "";
+  var m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/), d, mo, y;
+  if (m) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+  else { m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return ""; y = +m[1]; mo = +m[2]; d = +m[3]; }
+  var f = new Date(y, mo - 1, d);
+  if (f.getFullYear() !== y || f.getMonth() !== mo - 1 || f.getDate() !== d) return "";
+  if (y < 1900 || y > 2100) return "";
+  return f;
+}
+
+function sumarMesesFecha(d, n) {
+  var y = d.getFullYear(), m = d.getMonth() + n, dia = d.getDate();
+  var ultimo = new Date(y, m + 1, 0).getDate();
+  return new Date(y, m, Math.min(dia, ultimo));   // 31-ene + 1 mes = 28/29-feb (no desborda a marzo)
+}
+
+function calcularEdadExacta(fNac, hoy) {
+  var edad = hoy.getFullYear() - fNac.getFullYear();
+  var m = hoy.getMonth() - fNac.getMonth();
+  if (m < 0 || (m === 0 && hoy.getDate() < fNac.getDate())) edad--;
+  return edad;
+}
+
+// Talla en metros. Si el usuario escribe centímetros (ej. 175) se convierte; fuera de rango = inválida.
+function normalizarTalla(v) {
+  var t = parseFloatSafe(v);
+  if (t === "") return "";
+  if (t > 3 && t < 260) t = t / 100;
+  if (t < 0.5 || t > 2.6) return "";
+  return Math.round(t * 100) / 100;
+}
+
+function obtenerGenero(calcSheet) {
+  var g = calcSheet ? String(calcSheet.getRange("D2").getDisplayValue() || "").trim() : "";
+  return g || "Hombre";
+}
+// Mifflin-St Jeor: +5 hombres, -161 mujeres (antes la fila mensual usaba siempre +5)
+function constanteTMB(genero) { return (genero && String(genero).toLowerCase().indexOf("mujer") !== -1) ? -161 : 5; }
+function calcularDeficitCalorico(peso, tallaM, edad, genero) {
+  var tmb = (10 * peso) + (6.25 * (tallaM * 100)) - (5 * edad) + constanteTMB(genero);
+  return Math.round((tmb * 1.2) - 500);
+}
+function esFilaBalance(r) {
+  var i;
+  for (i = 0; i < JROWS_BALANCE.length; i++) { if (JROWS_BALANCE[i].r === r) return true; }
+  for (i = 0; i < MROWS_BALANCE.length; i++) { if (MROWS_BALANCE[i].r === r) return true; }
+  return false;
+}
+
+// Calcula diferencia exacta emulando SIFECHA de Excel
+function calcularDiferenciaMesesDias(fechaInicio, fechaFin) {
+  if (!fechaInicio || !fechaFin) return "";
+  var d1 = new Date(fechaInicio);
+  var d2 = new Date(fechaFin);
+  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return "";
+
+  var m1 = d1.getFullYear() * 12 + d1.getMonth();
+  var m2 = d2.getFullYear() * 12 + d2.getMonth();
+  var meses = m2 - m1;
+  var dias = d2.getDate() - d1.getDate();
+
+  if (dias < 0) {
+    meses--;
+    var ultimoDiaMesAnterior = new Date(d2.getFullYear(), d2.getMonth(), 0).getDate();
+    dias += ultimoDiaMesAnterior;
+  }
+
+  if (meses < 0) return "";
+  return meses + " meses, " + dias + " días";
+}
+
+// forzarFechas = true recalcula las fechas de los meses 2..13 desde la fecha de registro (C2);
+// en false solo rellena las vacías, respetando las fechas de medición que escribió el usuario.
+function restaurarFormulasPerfil(sheet, forzarFechas) {
+  var ss = sheet.getParent();
+  var calcSheet = ss.getSheetByName("Calculadora") || ss.getSheetByName("Calculadoras");
+  var diarioSheet = ss.getSheetByName("Diario");
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var genero = obtenerGenero(calcSheet);
+
+  // Edad exacta (antes se dividía entre 365.25 días y podía fallar un día)
+  var fNacVal = sheet.getRange("A19").getValue();
+  var edadCalc = "";
+  if (fNacVal instanceof Date && !isNaN(fNacVal.getTime())) { var ed = calcularEdadExacta(fNacVal, today); if (ed >= 0 && ed <= 120) edadCalc = ed; }
+  sheet.getRange("A4").setValue(edadCalc);
+  var edadVal = edadCalc;
+  var tallaVal = normalizarTalla(sheet.getRange("A7").getValue());
+  var pesoObj = parseFloatSafe(sheet.getRange("A16").getValue());
+  if (calcSheet) { sheet.getRange("A13").setValue(calcSheet.getRange("D6").getValue()); }
+
+  // Fechas de los meses
+  var c2Val = sheet.getRange("C2").getValue();
+  sheet.getRange("A31").setValue(c2Val);
+  var c2Date = (c2Val instanceof Date && !isNaN(c2Val.getTime())) ? c2Val : null;
+  var filaFechas = sheet.getRange("C2:O2").getValues()[0];
+  for (var i = 1; i < filaFechas.length; i++) {
+    if (!c2Date) { if (forzarFechas) filaFechas[i] = ""; continue; }
+    if (forzarFechas || filaFechas[i] === "") filaFechas[i] = sumarMesesFecha(c2Date, i);
+  }
+  sheet.getRange("C2:O2").setValues([filaFechas]);
+
+  // Peso, diferencia con el objetivo y déficit calórico de cada mes
+  sheet.getRange("C3").setValue(sheet.getRange("A10").getValue());
+  var pesosFila = sheet.getRange("C3:O3").getValues()[0];
+  var f4 = [], f19 = [];
+  for (var c = 0; c < pesosFila.length; c++) {
+    var pm = parseFloatSafe(pesosFila[c]);
+    f4.push((pm !== "" && pesoObj !== "") ? round2(pm - pesoObj) : "");
+    f19.push((pm !== "" && tallaVal !== "" && edadVal !== "") ? calcularDeficitCalorico(pm, tallaVal, edadVal, genero) : "");
+  }
+  sheet.getRange("C4:O4").setValues([f4]);
+  sheet.getRange("C19:O19").setValues([f19]);
+
+  // Escalones
+  var filasA = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163];
+  for (var k = 0; k < filasA.length; k++) {
+    sheet.getRange("A" + filasA[k]).setValue(filaFechas[k + 1]);   // D2..O2
+    var kVal = sheet.getRange("K" + filasA[k]).getValue();
+    sheet.getRange("L" + filasA[k]).setValue((c2Date && kVal instanceof Date) ? calcularDiferenciaMesesDias(c2Date, kVal) : "");
+  }
+
+  sheet.getRange("K23").setValue(today);
+  if (diarioSheet) {
+    var pesoActualDiario = diarioSheet.getRange("B382").getValue();
+    sheet.getRange("K27").setValue(diarioSheet.getRange("C382").getValue());
+    sheet.getRange("K31").setValue(pesoActualDiario);
+    if (calcSheet) {
+      calcSheet.getRange("D4").setValue(pesoActualDiario);
+      var pNum = parseFloatSafe(pesoActualDiario);
+      if (pNum !== "" && tallaVal !== "") { calcSheet.getRange("D7").setValue(Math.round((pNum / (tallaVal * tallaVal)) * 10) / 10); }
+      else { calcSheet.getRange("D7").setValue(""); }
+    }
+  }
+}
+
+function restaurarFormulasDiario(sheet) {
+  var ss = sheet.getParent();
+  var perfilSheet = ss.getSheetByName("Perfil");
+  var calcSheet = ss.getSheetByName("Calculadora") || ss.getSheetByName("Calculadoras");
+  var baseRaw = perfilSheet.getRange("C2").getValue();
+  var baseDate = (baseRaw instanceof Date && !isNaN(baseRaw.getTime())) ? baseRaw : parseFechaEntrada(baseRaw);
+  var pesoInicial = parseFloatSafe(perfilSheet.getRange("C3").getValue());
+  var edadVal = parseFloatSafe(perfilSheet.getRange("A4").getValue());
+  var edad = (edadVal !== "") ? edadVal : 30;   // sin fecha de nacimiento se asume 30 (el dashboard avisa con "edadAsumida")
+  var genero = obtenerGenero(calcSheet);
+
+  function calcBP(bpStr, ed) {
+    if (!bpStr || bpStr === "") return "";
+    var parts = String(bpStr).replace(/\s/g, "").split("/");
+    if (parts.length !== 2) return "Formato incorrecto";
+    var sys = parseInt(parts[0], 10), dia = parseInt(parts[1], 10);
+    if (isNaN(sys) || isNaN(dia)) return "Formato incorrecto";
+    var t2_sys = (ed < 50) ? 140 : (ed < 70 ? 150 : 160);
+    var t1_sys = (ed < 50) ? 130 : (ed < 70 ? 140 : 150);
+    var te_sys = 120 + (Math.max(3, Math.min(8, Math.floor(ed / 10))) - 3) * 5;
+    if (sys < 90 || dia < 60) return "Baja";
+    if (sys >= t2_sys || dia >= 90) return "Etapa 2 Alta";
+    if (sys >= t1_sys || dia >= 80) return "Alta";
+    if (sys >= te_sys && dia < 80) return "Elevada";
+    return "Normal";
+  }
+
+  var dataFull = sheet.getRange("B2:H381").getValues();
+  var dates = [], diffsC = [], diffsD = [], bpResults = [];
+  var sumC = 0, lastPeso = "", ultimoPeso = "", lastF = "--", lastG = "--", lastH = "--";
+
+  for (var i = 0; i < 380; i++) {
+    dates.push([baseDate ? new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i) : ""]);
+    var pCur = parseFloatSafe(dataFull[i][0]);
+
+    // Diferencia contra el ÚLTIMO peso registrado (antes, si faltaba el día anterior se restaba contra 0 y salía "+82 kg")
+    if (i > 0) {
+      if (pCur !== "" && ultimoPeso !== "") { var diff = round2(pCur - ultimoPeso); diffsC.push([diff]); sumC += diff; }
+      else { diffsC.push([""]); }
+    }
+    if (pCur !== "") { lastPeso = pCur; ultimoPeso = pCur; }
+
+    // Diferencia contra el peso inicial (si no hay peso inicial queda vacía, ya no se resta 0)
+    diffsD.push([(pCur !== "" && pesoInicial !== "") ? round2(pCur - pesoInicial) : ""]);
+
+    if (dataFull[i][4] !== "") lastF = dataFull[i][4];
+    if (dataFull[i][5] !== "") lastG = dataFull[i][5];
+    if (dataFull[i][6] !== "") lastH = dataFull[i][6];
+    bpResults.push([calcBP(dataFull[i][6], edad)]);
+  }
+  sheet.getRange("A2:A381").setValues(dates);
+  sheet.getRange("C3:C381").setValues(diffsC);
+  sheet.getRange("D2:D381").setValues(diffsD);
+  sheet.getRange("I2:I381").setValues(bpResults);
+  sheet.getRange("B382").setValue(lastPeso);
+  sheet.getRange("C382").setValue(round2(sumC));
+  sheet.getRange("F382").setValue(lastF);
+  sheet.getRange("G382").setValue(lastG);
+  sheet.getRange("H382").setValue(lastH);
+  sheet.getRange("I382").setValue(calcBP(lastH !== "--" ? lastH : "", edad));
+
+  // Balances (columna J). Solo se escribe lo que cambió.
+  var jActual = sheet.getRange("J2:J381").getValues();
+  function setJ(r, val) { if (jActual[r - 2][0] !== val) sheet.getRange("J" + r).setValue(val); }
+
+  // Balances Semanales
+  for (var j = 0; j < JROWS_BALANCE.length; j++) {
+    var map = JROWS_BALANCE[j];
+    var v1 = parseFloatSafe(dataFull[map.b1 - 2][0]); var v2 = parseFloatSafe(dataFull[map.b2 - 2][0]);
+    setJ(map.r, (v1 !== "" && v2 !== "") ? round2(v2 - v1) : "");
+  }
+  // Balances Mensuales
+  for (var m = 0; m < MROWS_BALANCE.length; m++) {
+    var mapM = MROWS_BALANCE[m];
+    var vs = parseFloatSafe(dataFull[mapM.startRow - 2][0]); var ve = parseFloatSafe(dataFull[mapM.endRow - 2][0]);
+    setJ(mapM.r, (vs !== "" && ve !== "") ? "(BALANCE MENSUAL) = " + (ve - vs).toFixed(2) + " Kg" : "");
+  }
+
+  // Déficit calórico diario en base al peso actual (misma fórmula que las filas mensuales, con género)
+  var deficitCalculado = "";
+  if (lastPeso !== "") {
+    var tallaVal = normalizarTalla(perfilSheet.getRange("A7").getValue());
+    if (tallaVal !== "") deficitCalculado = calcularDeficitCalorico(lastPeso, tallaVal, edad, genero);
+  }
+  sheet.getRange("K382").setValue(deficitCalculado);
+}
+
+// ==========================================
+// FUNCIONES PRINCIPALES (LEEN SU PROPIO ARCHIVO)
+// ==========================================
+
+function getDashboardData(userId, email, emailVerificado) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "dash_" + userId;
+  var esSuperAdmin = (userId === ADMIN_UID);
+
+  if (!esSuperAdmin) { var cachedData = cache.get(cacheKey); if (cachedData) return JSON.parse(cachedData); }
+
+  var userEnv = getUserSpreadsheet(userId, email, emailVerificado);
+  var esAdminRegular = (userEnv.rol === "Administrador" && userEnv.estado === "Autorizado");
+  var tieneRolAdministrador = esSuperAdmin || esAdminRegular;
+  
+  if (userEnv.estado === "Pendiente" && !esSuperAdmin) { return { isPendiente: true }; }
+  if (userEnv.estado === "Bloqueado" && !esSuperAdmin) { return { isBloqueado: true }; }
+  if (!userEnv.ss) { return { isPendiente: true }; }
+
+  var pSheet = userEnv.ss.getSheetByName("Perfil");
+  var pRange = pSheet.getRange(1, 1, 175, 15);
+  
+  // Extraemos objetos Date nativos para el cálculo y DisplayValues para la APP
+  var pRawObjects = pRange.getValues(); 
+  var pFormulas = pRange.getFormulas();
+  var pValues = pRange.getDisplayValues();
+
+  function fastReadImage(row, col) { var f = pFormulas[row-1][col-1]; if (f && f.toUpperCase().indexOf('=IMAGE') !== -1) { var match = f.match(/=IMAGE\("([^"]+)"/i); if (match) return match[1]; } return pValues[row-1][col-1]; }
+  function fastVal(row, col) { return pValues[row-1][col-1]; }
+
+  var diarioSheet = userEnv.ss.getSheetByName("Diario"); 
+  var calcSheet = userEnv.ss.getSheetByName("Calculadora") || userEnv.ss.getSheetByName("Calculadoras");
+  var centralSs = SpreadsheetApp.getActiveSpreadsheet();
+  var recetasSheet = centralSs.getSheetByName("RECETAS") || centralSs.getSheetByName("Recetas"); 
+  var appLogoUrl = readImageUrl(centralSs.getSheetByName("DB_Perfiles"), "N2");
+
+  var DEF_ESC = "https://i.postimg.cc/XvjwD97P/Tu-foto-aqui.jpg"; var DEF_FRE = "https://i.postimg.cc/dVdHKRY5/FRENTE.jpg"; var DEF_ESP = "https://i.postimg.cc/7ZY3KgL7/ESPALDA.jpg"; var DEF_PD = "https://i.postimg.cc/CKRjgSkk/PERFIL-DERECHO.jpg"; var DEF_PI = "https://i.postimg.cc/RhLtRF5D/PERFIL-IZQUIERDO.jpg";
+
+  var nombre = fastVal(2, 1) || "Usuario";
+  var fechaReg = fastVal(2, 3);
+  var pesoInicial = fastVal(10, 1);
+  var talla = fastVal(7, 1);
+  var pesoIdeal = fastVal(13, 1); 
+  var edadReal = fastVal(4, 1); var edadAsumida = !edadReal; var edad = edadReal || 30;
+  var fechaNac = fastVal(19, 1); 
+  var pesoActual = fastVal(31, 11); 
+  var deficit = diarioSheet ? diarioSheet.getRange("K382").getDisplayValue() : fastVal(19, 3);
+  var pesoObjetivo = fastVal(16, 1);
+  var genero = obtenerGenero(calcSheet);
+  var imcVal = calcSheet ? calcSheet.getRange("D7").getDisplayValue() : "";
+  var avatarUrl = fastReadImage(21, 1);
+  var evolucionHoy = fastVal(27, 11);
+
+  // AUTO-SANACIÓN DEL EXCEL: Si eliminaste la fórmula, el script detecta las celdas L vacías y las imprime automáticamente
+  var c2Date = pRawObjects[1][2]; // C2 Object Date
+  var filasFechas = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163]; var escalonesData = [];
+  
+  for (var i = 0; i < filasFechas.length; i++) { 
+    var filaF = filasFechas[i]; 
+    var escUrl = fastReadImage(34 + (i * 11), 14); 
+    
+    var kDateObj = pRawObjects[filaF - 1][10]; // Columna K (índice 10)
+    var lValorActual = pRawObjects[filaF - 1][11]; // Columna L (índice 11)
+
+    var diasFormateados = "";
+    if (c2Date instanceof Date && kDateObj instanceof Date) {
+      diasFormateados = calcularDiferenciaMesesDias(c2Date, kDateObj);
+    }
+    
+    // Si la celda en Excel está vacía o distinta, la re-escribimos directamente en el Spreadsheet
+    if (diasFormateados !== "" && lValorActual !== diasFormateados) {
+       pSheet.getRange("L" + filaF).setValue(diasFormateados);
+    }
+
+    escalonesData.push({ 
+      estado: fastVal(filaF - 4, 11), 
+      fecha: fastVal(filaF, 11), 
+      dias: diasFormateados || lValorActual, 
+      foto: (escUrl && escUrl.toString().startsWith("http")) ? escUrl : DEF_ESC 
+    }); 
+  }
+
+  var medidasMatriz = pSheet.getRange("C2:N18").getDisplayValues(); var mesesData = [];
+  for (var m = 1; m <= 12; m++) { var cI = m - 1; var fFM = 23 + ((m - 1) * 11); var uF = fastReadImage(fFM, 2); var uE = fastReadImage(fFM, 4); var uPD = fastReadImage(fFM, 6); var uPI = fastReadImage(fFM, 8); mesesData.push({ mes: m, fechaMed: medidasMatriz[0][cI], pesoColB: medidasMatriz[1][cI], difObj: medidasMatriz[2][cI], med: { cuello: medidasMatriz[3][cI], hombro: medidasMatriz[4][cI], pecho: medidasMatriz[5][cI], cintura: medidasMatriz[6][cI], brazoI: medidasMatriz[7][cI], brazoD: medidasMatriz[8][cI], anteI: medidasMatriz[9][cI], anteD: medidasMatriz[10][cI], circAb: medidasMatriz[11][cI], musloI: medidasMatriz[12][cI], musloD: medidasMatriz[13][cI], pantI: medidasMatriz[14][cI], pantD: medidasMatriz[15][cI], cadera: medidasMatriz[16][cI] }, fotos: { frente: (uF && uF.toString().startsWith("http")) ? uF : DEF_FRE, espalda: (uE && uE.toString().startsWith("http")) ? uE : DEF_ESP, perfilDer: (uPD && uPD.toString().startsWith("http")) ? uPD : DEF_PD, perfilIzq: (uPI && uPI.toString().startsWith("http")) ? uPI : DEF_PI } }); }
+
+  var diarioDataList = []; 
+  if (diarioSheet) {
+    var lastRowD = Math.min(diarioSheet.getLastRow(), 381);
+    if (lastRowD >= 2) { 
+      var dValues = diarioSheet.getRange(2, 1, lastRowD - 1, 11).getDisplayValues(); 
+      for (var d = 0; d < dValues.length; d++) { 
+        diarioDataList.push({ fila: d + 2, fecha: dValues[d][0], peso: dValues[d][1], dif: dValues[d][2], progreso: dValues[d][3], energia: dValues[d][4], caminata: dValues[d][5], agua: dValues[d][6], presion: dValues[d][7], presionStat: dValues[d][8], notas: dValues[d][9] }); 
+      } 
+    } 
+  }
+
+  var fotosCalc = { img1: "", img2: "", img3: "", img4: "", img5: "" };
+  if (calcSheet) { 
+    fotosCalc.img1 = readImageUrl(calcSheet, "B2"); 
+    fotosCalc.img2 = readImageUrl(calcSheet, "E1"); 
+    fotosCalc.img3 = readImageUrl(calcSheet, "F1"); 
+    fotosCalc.img4 = readImageUrl(calcSheet, "G13"); 
+    fotosCalc.img5 = readImageUrl(calcSheet, "G1"); 
+  }
+
+  var recetasList = [];
+  if (recetasSheet) { var lastRowR = recetasSheet.getLastRow(); if (lastRowR > 1) { var recRaw = recetasSheet.getRange(2, 1, lastRowR - 1, 6).getDisplayValues(); var recFormulas = recetasSheet.getRange(2, 6, lastRowR - 1, 1).getFormulas(); for(var r = 0; r < recRaw.length; r++) { if(!recRaw[r][0]) continue; var picUrl = recRaw[r][5]; var form = recFormulas[r][0]; if (form && form.toUpperCase().indexOf('=IMAGE') !== -1) { var match = form.match(/=IMAGE\("([^"]+)"/i); if (match) picUrl = match[1]; } recetasList.push({ fila: r + 2, nombre: recRaw[r][0], categoria: (recRaw[r][1] || "").toUpperCase().trim(), calorias: recRaw[r][2], ingredientes: recRaw[r][3], preparacion: recRaw[r][4], fotoRaw: picUrl }); } } }
+
+  var estadoSheet = centralSs.getSheetByName("FINANZAS_ESTADO");
+  var pagosSheet = centralSs.getSheetByName("FINANZAS_PAGOS");
+  var finanzasUser = { plan: "Sin plan", proximo: "--", estado: "Sin registro" };
+  var historialPagos = [];
+  var hoyF = new Date(); hoyF.setHours(0,0,0,0);
+
+  if (estadoSheet) {
+    var eData = estadoSheet.getDataRange().getValues();
+    for (var e = 1; e < eData.length; e++) {
+      if (eData[e][0] === userId) {
+        finanzasUser.plan = eData[e][2] || "Sin plan";
+        var fProx = eData[e][3];
+        if (fProx && fProx instanceof Date) {
+          finanzasUser.proximo = Utilities.formatDate(fProx, Session.getScriptTimeZone(), "dd/MM/yyyy");
+          var fProxDia = new Date(fProx); fProxDia.setHours(0,0,0,0); finanzasUser.estado = (fProxDia < hoyF) ? "VENCIDO" : (fProxDia.getTime() === hoyF.getTime() ? "VENCE HOY" : "AL DÍA");
+        }
+        break;
+      }
+    }
+  }
+  
+  if (pagosSheet) {
+    var pData = pagosSheet.getRange("A2:I" + Math.max(2, pagosSheet.getLastRow())).getDisplayValues();
+    for (var p = 0; p < pData.length; p++) {
+      if (pData[p][0] === userId) { historialPagos.push({ fecha: (pData[p][2]||"").substring(0,10), periodo: pData[p][3] + " " + pData[p][4], plan: pData[p][5], metodo: pData[p][6], recibo: pData[p][7], costo: pData[p][8] || "" }); }
+    }
+    historialPagos.reverse(); 
+  }
+
+  var responsePayload = { 
+    nombre: nombre, fechaReg: fechaReg, pesoInicial: pesoInicial, talla: talla, pesoIdeal: pesoIdeal, edad: edad, edadAsumida: edadAsumida, 
+    fechaNac: fechaNac, peso: pesoActual, deficit: deficit, pesoObjetivo: pesoObjetivo, genero: genero, imc: imcVal, 
+    evolucion: evolucionHoy, escalones: escalonesData, meses: mesesData, diario: diarioDataList, calcFotos: fotosCalc, 
+    recetas: recetasList, 
+    presionActual: diarioSheet ? diarioSheet.getRange("H382").getDisplayValue() : "", 
+    presionEstado: diarioSheet ? diarioSheet.getRange("I382").getDisplayValue() : "", 
+    ultimaCaminata: diarioSheet ? diarioSheet.getRange("F382").getDisplayValue() : "", 
+    ultimoAgua: diarioSheet ? diarioSheet.getRange("G382").getDisplayValue() : "", 
+    avatarUrl: avatarUrl, appLogoUrl: appLogoUrl, isAdmin: tieneRolAdministrador, 
+    isSuperAdmin: esSuperAdmin, finanzasCli: finanzasUser, historialPagos: historialPagos 
+  };
+
+  try { if (!esSuperAdmin) { var jsonStr = JSON.stringify(responsePayload); if (jsonStr.length < 90000) { cache.put(cacheKey, jsonStr, 300); } } } catch (errCache) {}
+  return responsePayload;
+}
+
+function saveWelcomeData(datos, userId) {
+  var userEnv = getUserSpreadsheetAutorizado(userId);
+  var sheet = userEnv.ss.getSheetByName("Perfil");
+  var calcSheet = userEnv.ss.getSheetByName("Calculadora") || userEnv.ss.getSheetByName("Calculadoras");
+  var diarioSheet = userEnv.ss.getSheetByName("Diario");
+
+  var nombre = textoSeguro(datos.nombre, 60);
+  if (nombre) sheet.getRange("A2").setValue(nombre);
+
+  // Fecha de registro (si cambia se recalculan las fechas de los meses)
+  var cambioFechaReg = false;
+  if (datos.fechaReg) {
+    var fr = parseFechaEntrada(datos.fechaReg);
+    if (fr === "") throw "Fecha de registro inválida. Usa DD/MM/AAAA.";
+    var c2Actual = sheet.getRange("C2").getValue();
+    cambioFechaReg = !(c2Actual instanceof Date) || isoDesdeFecha(c2Actual) !== isoDesdeFecha(fr);
+    sheet.getRange("C2").setValue(fr);
+  }
+  if (datos.fecha) {
+    var fn = parseFechaEntrada(datos.fecha);
+    if (fn === "") throw "Fecha de nacimiento inválida. Usa DD/MM/AAAA.";
+    if (fn.getTime() > new Date().getTime()) throw "La fecha de nacimiento no puede ser futura.";
+    sheet.getRange("A19").setValue(fn);
+  }
+  if (datos.pesoIni) {
+    var pi = parseFloatSafe(datos.pesoIni);
+    if (pi === "" || pi < 20 || pi > 400) throw "Peso inicial inválido (entre 20 y 400 kg).";
+    sheet.getRange("A10").setValue(pi);
+  }
+  var tallaNum = "";
+  if (datos.talla !== undefined && String(datos.talla).trim() !== "") {
+    tallaNum = normalizarTalla(datos.talla);
+    if (tallaNum === "") throw "Talla inválida. Escríbela en metros (ej: 1.75).";
+    sheet.getRange("A7").setValue(tallaNum);
+    if (calcSheet) calcSheet.getRange("D3").setValue(tallaNum);
+  }
+  if (datos.pesoObj !== undefined) {
+    var po = parseFloatSafe(datos.pesoObj);
+    if (po !== "" && (po < 20 || po > 400)) throw "Peso objetivo inválido (entre 20 y 400 kg).";
+    sheet.getRange("A16").setValue(po);
+  }
+  if (datos.avatarUrl !== undefined) writeImageUrl(sheet, "A21", datos.avatarUrl);
+
+  // Género: ya no se asume "Hombre" cuando no llega; se conserva el guardado
+  var generoUser = obtenerGenero(calcSheet);
+  if (datos.genero === "Hombre" || datos.genero === "Mujer") {
+    generoUser = datos.genero;
+    if (calcSheet) calcSheet.getRange("D2").setValue(generoUser);
+  }
+
+  // Peso ideal (Lorentz) con la talla guardada y el género actual
+  var tallaRef = (tallaNum !== "") ? tallaNum : normalizarTalla(sheet.getRange("A7").getValue());
+  if (tallaRef !== "" && calcSheet) {
+    var tallaCm = tallaRef * 100;
+    var pesoIdealCalc = (generoUser === "Mujer") ? (tallaCm - 100 - ((tallaCm - 150) / 2.5)) : (tallaCm - 100 - ((tallaCm - 150) / 4));
+    var pIdArr = Math.round(pesoIdealCalc * 10) / 10;
+    calcSheet.getRange("D6").setValue(pIdArr);
+    sheet.getRange("A13").setValue(pIdArr);
+  }
+
+  restaurarFormulasPerfil(sheet, cambioFechaReg);
+  if (diarioSheet) { restaurarFormulasDiario(diarioSheet); restaurarFormulasPerfil(sheet, false); }
+  actualizarDBPerfiles(userId, sheet, nombre);
+  CacheService.getScriptCache().remove("dash_" + userId);
+  return "¡Perfil configurado!";
+}
+
+function guardarEscalon(payload, userId) {
+  var userEnv = getUserSpreadsheetAutorizado(userId);
+  var sheet = userEnv.ss.getSheetByName("Perfil");
+  var filasFechas = [42, 53, 64, 75, 86, 97, 108, 119, 130, 141, 152, 163];
+  var numero = parseInt(payload.numero, 10);
+  if (!(numero >= 1 && numero <= 12)) throw "Escalón inválido.";
+  var estado = (payload.estado === "ALCANZADO") ? "ALCANZADO" : "";
+  var fechaTxt = String(payload.fecha || "").trim();
+  var fecha = fechaTxt ? parseFechaEntrada(fechaTxt) : "";
+  if (fechaTxt && fecha === "") throw "Fecha inválida. Usa DD/MM/AAAA.";
+  var fila = filasFechas[numero - 1];
+
+  sheet.getRange("K" + (fila - 4)).setValue(estado);
+  sheet.getRange("K" + fila).setValue(fecha);
+  var c2Val = sheet.getRange("C2").getValue();
+  // Tiempo transcurrido desde el registro, escrito en la columna L
+  sheet.getRange("L" + fila).setValue((c2Val instanceof Date && fecha instanceof Date) ? calcularDiferenciaMesesDias(c2Val, fecha) : "");
+
+  CacheService.getScriptCache().remove("dash_" + userId);
+  return "Guardado";
+}
+
+function guardarFotoEscalonBackend(payload, userId) {
+  var userEnv = getUserSpreadsheetAutorizado(userId);
+  var sheet = userEnv.ss.getSheetByName("Perfil");
+  var numero = parseInt(payload.numero, 10);
+  if (!(numero >= 1 && numero <= 12)) throw "Escalón inválido.";
+  writeImageUrl(sheet, "N" + (34 + (numero - 1) * 11), payload.url);
+  CacheService.getScriptCache().remove("dash_" + userId);
+  return "Foto guardada";
+}
+
+function saveMedidasMesUniversal(payload, userId) {
+  var userEnv = getUserSpreadsheetAutorizado(userId);
+  var sheet = userEnv.ss.getSheetByName("Perfil");
+  var mes = parseInt(payload.mes, 10);
+  if (!(mes >= 1 && mes <= 12)) throw "Mes inválido.";
+  var colLetra = String.fromCharCode(66 + mes);   // mes 1 = C ... mes 12 = N
+
+  // Fecha: el mes 1 es la fecha de registro (C2); en los demás, si se deja vacía se autocalcula
+  var cambioFechaReg = false;
+  var fecha = parseFechaEntrada(payload.fechaMed);
+  if (payload.fechaMed && fecha === "") throw "Fecha inválida. Usa DD/MM/AAAA.";
+  if (mes === 1) {
+    if (fecha !== "") {
+      var c2Actual = sheet.getRange("C2").getValue();
+      cambioFechaReg = !(c2Actual instanceof Date) || isoDesdeFecha(c2Actual) !== isoDesdeFecha(fecha);
+      sheet.getRange("C2").setValue(fecha);
+    }
+  } else {
+    sheet.getRange(colLetra + "2").setValue(fecha);
+    // El peso del mes 1 es siempre el peso inicial (A10) y la fila 4 se calcula sola: solo se guarda el peso de los meses 2-12
+    var pesoMes = parseFloatSafe(payload.pesoColB);
+    if (pesoMes !== "" && (pesoMes < 20 || pesoMes > 400)) throw "Peso inválido (entre 20 y 400 kg).";
+    sheet.getRange(colLetra + "3").setValue(pesoMes);
+  }
+
+  // 14 medidas, filas 5..18, en el MISMO orden en que el dashboard las lee (antes faltaban brazo derecho y pantorrilla derecha y todo se corría una fila)
+  var campos = ["cuello", "hombro", "pecho", "cintura", "brazoI", "brazoD", "anteI", "anteD", "circAb", "musloI", "musloD", "pantI", "pantD", "cadera"];
+  var vals = campos.map(function(c) {
+    var v = parseFloatSafe(payload[c]);
+    if (v !== "" && (v <= 0 || v > 300)) throw "Medida inválida en: " + c;
+    return [v];
+  });
+  sheet.getRange(colLetra + "5:" + colLetra + "18").setValues(vals);
+
+  var fM = 23 + ((mes - 1) * 11);
+  writeImageUrl(sheet, "B" + fM, payload.fotoFrente);
+  writeImageUrl(sheet, "D" + fM, payload.fotoEspalda);
+  writeImageUrl(sheet, "F" + fM, payload.fotoPerfilDer);
+  writeImageUrl(sheet, "H" + fM, payload.fotoPerfilIzq);
+
+  restaurarFormulasPerfil(sheet, cambioFechaReg);
+  CacheService.getScriptCache().remove("dash_" + userId);
+  return "Medidas actualizadas";
+}
+
+function saveDiaDiario(datos, userId) {
+  var userEnv = getUserSpreadsheetAutorizado(userId);
+  var sheet = userEnv.ss.getSheetByName("Diario");
+  var pSheet = userEnv.ss.getSheetByName("Perfil");
+
+  var filaNum = parseInt(datos.fila, 10);
+  if (!(filaNum >= 2 && filaNum <= 381)) throw "Fila inválida.";
+  var peso = parseFloatSafe(datos.peso);
+  if (peso !== "" && (peso < 20 || peso > 400)) throw "Peso inválido (entre 20 y 400 kg).";
+  var energia = String(datos.energia || "").trim();
+  if (energia && ["1", "2", "3", "4", "5"].indexOf(energia) < 0) throw "Energía inválida (1 a 5).";
+  var caminata = String(datos.caminata || "").trim().toUpperCase();
+  if (["", "NO", "15 MIN", "30 MIN", "45 MIN", "1 HORA", "1H 30 MIN", "2 HORAS"].indexOf(caminata) < 0) throw "Valor de caminata inválido.";
+  var agua = String(datos.agua || "").trim().toUpperCase();
+  if (["", "4 VASOS", "6 VASOS", "1 LITRO", "2 LITROS", "3 LITROS", "4 LITROS", "5+ LITROS"].indexOf(agua) < 0) throw "Valor de agua inválido.";
+  var presion = String(datos.presion || "").replace(/mmhg/gi, "").replace(/\s+/g, "");
+  if (presion && !/^\d{2,3}\/\d{2,3}$/.test(presion)) throw "Presión inválida. Usa el formato 120/80.";
+
+  sheet.getRange(filaNum, 2).setValue(peso);
+  sheet.getRange(filaNum, 5).setValue(energia === "" ? "" : Number(energia));
+  sheet.getRange(filaNum, 6).setValue(caminata);
+  sheet.getRange(filaNum, 7).setValue(agua);
+  var celdaP = sheet.getRange(filaNum, 8); celdaP.setNumberFormat("@"); celdaP.setValue(presion);   // texto: "120/80" nunca se interpreta como fecha
+  // Las filas de balance (semanal/mensual) viven en la columna J: ahí no se escriben notas para no perder el balance
+  if (!esFilaBalance(filaNum) && !sheet.getRange(filaNum, 10).getFormula()) { sheet.getRange(filaNum, 10).setValue(textoSeguro(datos.notas, 300)); }
+
+  SpreadsheetApp.flush();
+  restaurarFormulasDiario(sheet);
+  restaurarFormulasPerfil(pSheet, false);
+  actualizarDBPerfiles(userId, pSheet);
+  CacheService.getScriptCache().remove("dash_" + userId);
+  return "Día actualizado correctamente";
+}
+
+function guardarFotosCalculadora(datos) { var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Calculadora") || SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Calculadoras"); if(sheet) { writeImageUrl(sheet, "B2", datos.img1); writeImageUrl(sheet, "E1", datos.img2); writeImageUrl(sheet, "F1", datos.img3); writeImageUrl(sheet, "G13", datos.img4); writeImageUrl(sheet, "G1", datos.img5); return "Fotos guardadas"; } }
+function saveRecetaBackend(datos) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("RECETAS") || ss.getSheetByName("Recetas");
+  var row = datos.fila ? parseInt(datos.fila, 10) : (sheet.getLastRow() + 1);
+  if (!(row >= 2)) throw "Fila de receta inválida.";
+  var nombre = textoSeguro(datos.nombre, 120);
+  if (!nombre) throw "La receta necesita un nombre.";
+  sheet.getRange(row, 1).setValue(nombre);
+  sheet.getRange(row, 2).setValue(textoSeguro(datos.categoria, 40));
+  sheet.getRange(row, 3).setValue(textoSeguro(datos.calorias, 40));
+  sheet.getRange(row, 4).setValue(textoSeguro(datos.ingredientes, 3000));
+  sheet.getRange(row, 5).setValue(textoSeguro(datos.preparacion, 5000));
+  writeImageUrl(sheet, "F" + row, datos.foto);
+  return "Receta guardada";
+}
+
+function actualizarIconoApp(url) { writeImageUrl(SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles"), "N2", url); return "Ícono actualizado"; }
+// ==========================================
+// GESTIÓN DE USUARIOS ADMIN (modelo Control Freelancer: UID, Cliente, Correo, Teléfono, Fecha registro, Rol, Estatus)
+// Col O = ESTATUS (Pendiente / Autorizado / Bloqueado) · Col R = TELÉFONO · Col S = FECHA REGISTRO · Col T = ROL (Cliente / Administrador)
+// Compatibilidad: el valor antiguo "Admin" en la col O se lee como Rol=Administrador + Estatus=Autorizado.
+// ==========================================
+function leerRolEstado(fila) {
+  var estado = fila[14] || "Autorizado";
+  var rol = fila[19] || "Cliente";
+  if (estado === "Admin") { estado = "Autorizado"; rol = "Administrador"; }
+  return { rol: rol, estado: estado };
+}
+
+function getUsersList() {
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var rango = dbSheet.getRange("A2:T" + Math.max(2, dbSheet.getLastRow()));
+  var disp = rango.getDisplayValues();
+  var vals = rango.getValues();
+  var users = []; var rellenados = 0;
+  for (var i = 0; i < disp.length; i++) {
+    if (disp[i][0] === "") continue;
+    var uid = disp[i][0];
+    var re = leerRolEstado(vals[i]);
+    var fecha = aIsoFecha(vals[i][18]);
+    // Usuarios antiguos sin fecha de registro: se toma la fecha de creación de su hoja (máx. 15 por consulta).
+    if (!fecha && uid !== ADMIN_UID && disp[i][16] && rellenados < 15) {
+      try { var creada = DriveApp.getFileById(disp[i][16]).getDateCreated(); dbSheet.getRange(i + 2, 19).setValue(creada); fecha = aIsoFecha(creada); rellenados++; } catch (e) {}
+    }
+    users.push({ uid: uid, nombre: disp[i][1], email: disp[i][15], telefono: disp[i][17], fechaRegistro: fecha, rol: re.rol, estado: re.estado, protegido: (uid === ADMIN_UID) });
+  }
+  return users;
+}
+
+function actualizarUsuario(p, quien) {
+  var uid = String(p.uid || "");
+  if (!uid) throw "Falta el usuario.";
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var fila = buscarFilaUsuario(dbSheet, uid);
+  if (!fila) throw "Usuario no encontrado.";
+  escribirTelefono(dbSheet, fila, limpiarTelefono(p.telefono));
+  // Ni el súper admin ni tu propia cuenta pueden cambiar de rol o estatus.
+  if (uid !== ADMIN_UID && uid !== quien) {
+    var rol = (p.rol === "Administrador") ? "Administrador" : "Cliente";
+    var estado = (["Pendiente", "Autorizado", "Bloqueado"].indexOf(p.estado) >= 0) ? p.estado : "Pendiente";
+    dbSheet.getRange(fila, 15).setValue(estado);
+    dbSheet.getRange(fila, 20).setValue(rol);
+  }
+  CacheService.getScriptCache().remove("dash_" + uid);
+  return "Usuario actualizado";
+}
+
+function eliminarUser(uid, quien) {
+  uid = String(uid || "");
+  if (!uid) throw "Falta el usuario.";
+  if (uid === quien || uid === ADMIN_UID) throw "No puedes eliminar tu propia cuenta de administrador.";
+  var dbSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var fila = buscarFilaUsuario(dbSheet, uid);
+  if (!fila) throw "Usuario no encontrado.";
+
+  var sheetId = String(dbSheet.getRange(fila, 17).getValue() || "");
+  if (sheetId && sheetId !== TEMPLATE_ID) { try { DriveApp.getFileById(sheetId).setTrashed(true); } catch (e) {} }   // nunca se manda la PLANTILLA a la papelera
+
+  // El ícono global de la app vive en N2: si se borra la fila 2 hay que conservarlo
+  var celdaLogo = dbSheet.getRange("N2"); var logoFormula = celdaLogo.getFormula(); var logoValor = celdaLogo.getValue();
+  dbSheet.deleteRow(fila);
+  if (fila === 2) { var n2 = dbSheet.getRange("N2"); if (logoFormula) n2.setFormula(logoFormula); else if (logoValor !== "") n2.setValue(logoValor); }
+
+  // Limpia su estado de suscripción (el historial de pagos se conserva)
+  try {
+    var he = getHojaEstado(); var ne = he.getLastRow();
+    if (ne >= 2) { var ue = he.getRange(2, 1, ne - 1, 1).getValues(); for (var j = 0; j < ue.length; j++) { if (String(ue[j][0]) === uid) { he.deleteRow(j + 2); break; } } }
+  } catch (e2) {}
+  _mapaUsuarios = null;
+  CacheService.getScriptCache().remove("dash_" + uid);
+  return "Usuario eliminado correctamente";
+}
+
+// ==========================================
+// FINANZAS Y PAGOS ADMIN (solo lectura, igual que "Panel de Finanzas" de Control Freelancer)
+// Se alimenta sola desde Control Suscripciones Admin (casilla Cobrado).
+// ==========================================
+function getFinanzasData() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var dbSheet = ss.getSheetByName("DB_Perfiles");
+  var usersData = dbSheet.getRange("A2:T" + Math.max(2, dbSheet.getLastRow())).getValues();
+
+  var hojaEstado = getHojaEstado();
+  var eData = hojaEstado.getLastRow() >= 2 ? hojaEstado.getRange(2, 1, hojaEstado.getLastRow() - 1, 4).getValues() : [];
+  var estados = {};
+  for (var e = 0; e < eData.length; e++) { if (eData[e][0]) estados[eData[e][0]] = { plan: eData[e][2], proximo: aIsoFecha(eData[e][3]) }; }
+
+  var nombres = {}; var usuarios = [];
+  for (var j = 0; j < usersData.length; j++) {
+    var uid = usersData[j][0]; if (!uid) continue;
+    var correo = String(usersData[j][15] || ""); var nombre = String(usersData[j][1] || "");
+    nombres[uid] = { correo: correo, nombre: nombre };
+    if (leerRolEstado(usersData[j]).estado !== "Autorizado") continue; // solo usuarios autorizados
+    var est = estados[uid];
+    usuarios.push({ uid: uid, correo: correo, nombre: nombre, plan: est ? est.plan : "", proximo: est ? est.proximo : "" });
+  }
+  usuarios.sort(function(a, b) { return (a.correo || a.nombre).toLowerCase().localeCompare((b.correo || b.nombre).toLowerCase()); });
+
+  var hojaPagos = getHojaPagos();
+  var pData = hojaPagos.getLastRow() >= 2 ? hojaPagos.getRange(2, 1, hojaPagos.getLastRow() - 1, 11).getValues() : [];
+  var pagos = [];
+  for (var p = pData.length - 1; p >= 0 && pagos.length < 100; p--) { // lo más reciente arriba
+    var f = pData[p]; if (!f[0] && !f[10]) continue;
+    var info = nombres[f[0]] || { correo: "", nombre: "" };
+    var mes = String(f[3] || ""); mes = mes ? mes.charAt(0).toUpperCase() + mes.slice(1).toLowerCase() : "";
+    pagos.push({ fecha: aIsoFecha(f[2]) || String(f[2] || "").substring(0, 10), correo: String(f[10] || info.correo || ""), nombre: info.nombre || String(f[1] || ""), periodo: (mes + " " + (f[4] || "")).trim(), plan: f[5], metodo: f[6], monto: f[8], recibo: f[7] });
+  }
+  return { usuarios: usuarios, pagos: pagos };
+}
+
+// ==========================================
+// MÓDULO CONTROL SUSCRIPCIONES ADMIN (modelo Control Freelancer Pro)
+// Hoja CONTROL_SAAS (datos desde la fila 3):
+//  A PLAN/SERVICIO · B CORREO USUARIO · C MONTO · D COBRADO · E FECHA SUSCRIPCIÓN · F FECHA PAGO
+//  G VENCE HOY · H VENCIDO 7D · I VENCIDO 15D (solo guardan "ENVIADO"; lo demás se calcula)
+//  J COMPROBANTE · K MES · L AÑO (sin uso, se conservan) · M MÉTODO · N TIPO SUSCRIPCIÓN · O ID
+// ==========================================
+var HOJA_CONTROL = "CONTROL_SAAS";
+var CONTROL_PRIMERA_FILA = 3;
+var CONTROL_COLS = 15;
+var MESES_UP = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+var ETAPAS_COBRO = [
+  { dias: 0, col: 7, etiqueta: "VENCIDO" },
+  { dias: 7, col: 8, etiqueta: "VENCIDO 7D" },
+  { dias: 15, col: 9, etiqueta: "VENCIDO 15D" }
+];
+var CAMPOS_CONTROL = { plan: 1, correo: 2, monto: 3, cobrado: 4, fecha_suscripcion: 5, fecha_pago: 6, comprobante_url: 10, metodo_pago: 13, tipo_suscripcion: 14 };
+var _mapaUsuarios = null;
+var _filasCache = null;   // caché por ejecución de las filas de CONTROL_SAAS (se invalida en cada escritura)
+function invalidarCacheControl() { _filasCache = null; }
+
+// ---------- Fechas (mismas reglas que lib/fechas.ts de Freelancer) ----------
+function aIsoFecha(v) {
+  if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if (typeof v === "string") { var m = v.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return m[1] + "-" + m[2] + "-" + m[3]; }
+  return "";
+}
+function parseFechaIso(iso) { var m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null; }
+function isoDesdeFecha(d) { var mm = ("0" + (d.getMonth() + 1)).slice(-2); var dd = ("0" + d.getDate()).slice(-2); return d.getFullYear() + "-" + mm + "-" + dd; }
+// La fecha del navegador solo se acepta si está a ±1 día de la del servidor (evita fechas manipuladas)
+function hoyIso(hoyCliente) {
+  var servidor = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(hoyCliente || "")) { var dd = diasDesdeIso(hoyCliente, servidor); if (dd !== null && Math.abs(dd) <= 1) return hoyCliente; }
+  return servidor;
+}
+
+function diasDesdeIso(iso, hoy) { var f = parseFechaIso(iso), r = parseFechaIso(hoy); if (!f || !r) return null; return Math.round((r.getTime() - f.getTime()) / 86400000); }
+// 30-ago + 1 mes = 30-sep y 31-ago + 1 mes = 30-sep (no desborda al mes siguiente)
+function sumarMesesIso(iso, meses) {
+  var f = parseFechaIso(iso) || new Date(); var dia = f.getDate();
+  f.setDate(1); f.setMonth(f.getMonth() + meses);
+  var ultimo = new Date(f.getFullYear(), f.getMonth() + 1, 0).getDate();
+  f.setDate(Math.min(dia, ultimo));
+  return isoDesdeFecha(f);
+}
+// Mensual: mismo día del mes siguiente · Anual: la misma fecha
+function fechaPagoDeCiclo(fsusc, tipo) { return tipo === "Anual" ? fsusc : sumarMesesIso(fsusc, 1); }
+function siguienteCiclo(fsusc, fpago, tipo, hoy) {
+  var inicio = (tipo === "Anual") ? sumarMesesIso(fsusc || fpago || hoy, 12) : (fpago || (fsusc ? sumarMesesIso(fsusc, 1) : hoy));
+  return { fecha_suscripcion: inicio, fecha_pago: fechaPagoDeCiclo(inicio, tipo) };
+}
+
+// ---------- Hoja CONTROL_SAAS ----------
+function getHojaControl() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hoja = ss.getSheetByName(HOJA_CONTROL);
+  if (!hoja) {
+    hoja = ss.insertSheet(HOJA_CONTROL);
+    hoja.getRange(1, 1).setValue("CONTROL DE SUSCRIPCIONES SAAS Y MEMBRESÍAS");
+    hoja.getRange(2, 1, 1, CONTROL_COLS).setValues([["PLAN / SERVICIO", "CORREO USUARIO", "MONTO", "COBRADO", "FECHA DE SUSCRIPCION", "FECHA DE PAGO", "VENCE HOY", "VENCIDO 7 DÍAS", "VENCIDO 15 DÍAS", "COMPROBANTE", "MES", "AÑO", "MÉTODO", "TIPO SUSCRIPCION", "ID"]]);
+  } else {
+    var enc = hoja.getRange(2, 14, 1, 2).getValues()[0];
+    if (!enc[0]) hoja.getRange(2, 14).setValue("TIPO SUSCRIPCION");
+    if (!enc[1]) hoja.getRange(2, 15).setValue("ID");
+  }
+  return hoja;
+}
+
+function filaDesdeValores(f, nFila) {
+  return {
+    fila: nFila, id: String(f[14] || ""), plan: String(f[0] || ""), correo: String(f[1] || "").trim(),
+    monto: parseFloat(f[2]) || 0, cobrado: (f[3] === true || String(f[3]).toUpperCase() === "TRUE"),
+    fecha_suscripcion: aIsoFecha(f[4]), fecha_pago: aIsoFecha(f[5]),
+    marcas: [String(f[6] || ""), String(f[7] || ""), String(f[8] || "")],
+    comprobante_url: String(f[9] || ""), metodo_pago: String(f[12] || ""), tipo_suscripcion: (f[13] === "Anual" ? "Anual" : "Mensual")
+  };
+}
+
+// Lee todas las filas con datos. Le asigna ID a las que no lo tengan (en un solo bloque).
+function leerFilasControl(hoja) {
+  if (_filasCache) return _filasCache;
+  var ultima = hoja.getLastRow();
+  if (ultima < CONTROL_PRIMERA_FILA) return [];
+  var vals = hoja.getRange(CONTROL_PRIMERA_FILA, 1, ultima - CONTROL_PRIMERA_FILA + 1, CONTROL_COLS).getValues();
+  var filas = []; var faltanIds = false; var colIds = [];
+  for (var i = 0; i < vals.length; i++) {
+    var f = vals[i];
+    var vacia = (f[0] === "" && f[1] === "" && f[2] === "" && f[4] === "" && f[5] === "" && f[9] === "" && f[12] === "");
+    if (!vacia && f[14] === "") { f[14] = Utilities.getUuid(); faltanIds = true; }
+    colIds.push([f[14]]);
+    if (!vacia) filas.push(filaDesdeValores(f, CONTROL_PRIMERA_FILA + i));
+  }
+  if (faltanIds) hoja.getRange(CONTROL_PRIMERA_FILA, 15, colIds.length, 1).setValues(colIds);
+  _filasCache = filas;
+  return filas;
+}
+
+function buscarFilaControl(hoja, id) {
+  var filas = leerFilasControl(hoja);
+  for (var i = 0; i < filas.length; i++) { if (filas[i].id === id) return filas[i]; }
+  return null;
+}
+
+function primeraFilaLibreControl(hoja) {
+  var ultima = hoja.getLastRow();
+  if (ultima < CONTROL_PRIMERA_FILA) return CONTROL_PRIMERA_FILA;
+  var vals = hoja.getRange(CONTROL_PRIMERA_FILA, 1, ultima - CONTROL_PRIMERA_FILA + 1, CONTROL_COLS).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    var f = vals[i];
+    if (f[0] === "" && f[1] === "" && f[2] === "" && f[4] === "" && f[5] === "" && f[9] === "" && f[12] === "" && f[14] === "") return CONTROL_PRIMERA_FILA + i;
+  }
+  return ultima + 1;
+}
+
+// Vence Hoy / 7 Días / 15 Días: "ENVIADO" si ya se mandó, "VENCIDO…" si ya pasó el plazo, "" si nada.
+function marcaHecha(m) { return m === "ENVIADO" || m === "OMITIDO"; }
+function estadosVencimientoFila(f, hoy) {
+  var dias = f.cobrado ? null : diasDesdeIso(f.fecha_pago, hoy);
+  return ETAPAS_COBRO.map(function(et, i) {
+    if (marcaHecha(f.marcas[i])) return f.marcas[i];
+    if (dias !== null && dias >= et.dias) return et.etiqueta;
+    return "";
+  });
+}
+
+// Se envía una sola etapa por ejecución y en orden: hoy → 7D → 15D.
+// Se envía SOLO la etapa más alta que ya corresponde (antes, con 20 días de atraso se mandaba primero el aviso de "vence hoy").
+function etapaPendienteFila(f, hoy) {
+  if (f.cobrado) return -1;
+  var dias = diasDesdeIso(f.fecha_pago, hoy); if (dias === null) return -1;
+  for (var i = ETAPAS_COBRO.length - 1; i >= 0; i--) {
+    if (dias >= ETAPAS_COBRO[i].dias) return marcaHecha(f.marcas[i]) ? -1 : i;
+  }
+  return -1;
+}
+
+// Deja en la hoja el mismo texto que ve el admin (VENCIDO / ENVIADO) para poder leerla a mano.
+function actualizarEstadosVencimientoSaaS(hoy) {
+  var hoja = getHojaControl(); var filas = leerFilasControl(hoja);
+  if (!filas.length) return;
+  var primera = filas[0].fila; var ultima = filas[filas.length - 1].fila;
+  var rango = hoja.getRange(primera, 7, ultima - primera + 1, 3); var vals = rango.getValues();
+  for (var i = 0; i < filas.length; i++) {
+    var est = estadosVencimientoFila(filas[i], hoy); var k = filas[i].fila - primera;
+    vals[k] = est;
+  }
+  rango.setValues(vals);
+  invalidarCacheControl();
+}
+
+// Lista de clientes para el selector: se muestra el nombre y se guarda el correo.
+function listarCorreosUsuarios() {
+  var mapa = mapaUsuarios(true); var lista = [];
+  for (var c in mapa) { lista.push({ correo: mapa[c].correo, nombre: mapa[c].nombre }); }
+  lista.sort(function(a, b) { return (a.nombre || a.correo).toLowerCase().localeCompare((b.nombre || b.correo).toLowerCase()); });
+  return lista;
+}
+
+// correo (minúsculas) → { uid, nombre, correo }
+function mapaUsuarios(forzar) {
+  if (_mapaUsuarios && !forzar) return _mapaUsuarios;
+  var db = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DB_Perfiles");
+  var data = db.getRange("A2:P" + Math.max(2, db.getLastRow())).getValues(); var mapa = {};
+  for (var i = 0; i < data.length; i++) {
+    var correo = String(data[i][15] || "").trim();
+    // si dos cuentas declaran el mismo correo, gana la primera registrada (evita que alguien se "robe" la suscripción de otro)
+    var k = correo.toLowerCase();
+    if (data[i][0] && correo && !mapa[k]) mapa[k] = { uid: data[i][0], nombre: String(data[i][1] || ""), correo: correo };
+  }
+  _mapaUsuarios = mapa; return mapa;
+}
+function usuarioPorCorreo(correo) { return correo ? (mapaUsuarios()[String(correo).trim().toLowerCase()] || null) : null; }
+
+// ---------- Acciones de la tabla ----------
+function obtenerDatosControlSaaS(payload) {
+  try {
+    migrarControlSaaSV2();
+    migrarControlSaaSV3();
+    var hoy = hoyIso(payload && payload.hoy);
+    var filas = leerFilasControl(getHojaControl());
+    var salida = filas.map(function(f) {
+      return { id: f.id, plan: f.plan, correo: f.correo, monto: f.monto, cobrado: f.cobrado, tipo_suscripcion: f.tipo_suscripcion, metodo_pago: f.metodo_pago, fecha_suscripcion: f.fecha_suscripcion, fecha_pago: f.fecha_pago, comprobante_url: f.comprobante_url, estados: estadosVencimientoFila(f, hoy) };
+    });
+    return { filas: salida, correos: listarCorreosUsuarios() };
+  } catch (e) { return { error: mensajeError(e) }; }
+}
+
+// Al cambiar la fecha de suscripción o el tipo se recalcula la fecha de pago; al marcar Cobrado sin fecha de pago se usa hoy.
+function completarCambiosControl(fila, cambios, hoy) {
+  var r = {}; for (var k in cambios) { r[k] = cambios[k]; }
+  var cambiaCiclo = ("fecha_suscripcion" in cambios) || ("tipo_suscripcion" in cambios);
+  var inicio = ("fecha_suscripcion" in cambios) ? cambios.fecha_suscripcion : (fila ? fila.fecha_suscripcion : "");
+  if (cambiaCiclo && inicio && !("fecha_pago" in cambios)) {
+    var tipo = cambios.tipo_suscripcion || (fila ? fila.tipo_suscripcion : "") || "Mensual";
+    r.fecha_pago = fechaPagoDeCiclo(inicio, tipo);
+  }
+  if (cambios.cobrado === true && !(fila && fila.fecha_pago) && !r.fecha_pago) r.fecha_pago = hoy;
+  return r;
+}
+
+function escribirCambiosFila(hoja, nFila, cambios) {
+  for (var campo in cambios) {
+    var col = CAMPOS_CONTROL[campo]; if (!col) continue;
+    var v = cambios[campo]; var celda = hoja.getRange(nFila, col);
+    if (campo === "fecha_suscripcion" || campo === "fecha_pago") {
+      if (v) { var f = parseFechaIso(v); if (!f) throw "Fecha inválida."; celda.setValue(f); } else celda.clearContent();
+    }
+    else if (campo === "cobrado") celda.setValue(v === true);
+    else if (campo === "monto") celda.setValue(Math.max(0, round2(parseFloat(v) || 0)));
+    else if (campo === "tipo_suscripcion") celda.setValue(v === "Anual" ? "Anual" : "Mensual");
+    else celda.setValue(textoSeguro(v, campo === "comprobante_url" ? 500 : 120));
+  }
+  invalidarCacheControl();
+}
+
+function guardarCambioControlSaaS(p) {
+  var hoy = hoyIso(p.hoy); var hoja = getHojaControl();
+  var previo = buscarFilaControl(hoja, String(p.id || ""));
+  if (!previo) throw "No se encontró el registro. Recarga la pantalla.";
+  var cambios = completarCambiosControl(previo, p.cambios || {}, hoy);
+  escribirCambiosFila(hoja, previo.fila, cambios);
+  // Como el trigger "reiniciar_avisos": al marcar cobrado o cambiar la fecha de pago se limpian los avisos enviados.
+  if (cambios.cobrado === true || ("fecha_pago" in cambios && cambios.fecha_pago !== previo.fecha_pago)) hoja.getRange(previo.fila, 7, 1, 3).clearContent();
+  invalidarCacheControl();
+  var nueva = buscarFilaControl(hoja, previo.id);
+  sincronizarControlConFinanzas(nueva, previo, hoy);
+  actualizarEstadosVencimientoSaaS(hoy);
+  return "Guardado";
+}
+
+function insertarFilaControl(hoja, o) {
+  var id = Utilities.getUuid(); var fila = primeraFilaLibreControl(hoja);
+  hoja.getRange(fila, 1, 1, CONTROL_COLS).setValues([[textoSeguro(o.plan, 120), textoSeguro(o.correo, 120), Math.max(0, round2(Number(o.monto) || 0)), o.cobrado === true, o.fecha_suscripcion ? parseFechaIso(o.fecha_suscripcion) : "", o.fecha_pago ? parseFechaIso(o.fecha_pago) : "", "", "", "", textoSeguro(o.comprobante_url, 500), "", "", textoSeguro(o.metodo_pago, 60), o.tipo_suscripcion === "Anual" ? "Anual" : "Mensual", id]]);
+  invalidarCacheControl();
+  return id;
+}
+
+// La fila vacía del final de la tabla: al escribir en ella se crea el registro.
+function crearRegistroControlSaaS(p) {
+  var hoy = hoyIso(p.hoy); var hoja = getHojaControl();
+  var base = { plan: "", correo: "", monto: 0, cobrado: false, tipo_suscripcion: "Mensual", metodo_pago: "", fecha_suscripcion: "", fecha_pago: "", comprobante_url: "" };
+  var cambios = completarCambiosControl(null, p.cambios || {}, hoy);
+  for (var k in cambios) { base[k] = cambios[k]; }
+  var id = insertarFilaControl(hoja, base);
+  sincronizarControlConFinanzas(buscarFilaControl(hoja, id), null, hoy);
+  actualizarEstadosVencimientoSaaS(hoy);
+  return "Registro creado";
+}
+
+// Renovar: el nuevo ciclo empieza donde terminó el anterior (fecha de pago en mensual, un año después en anual).
+// Renovar: el nuevo ciclo empieza donde terminó el anterior (fecha de pago en mensual, un año después en anual).
+// Nota de diseño: el mensual se cobra al FINAL del ciclo (fecha de pago = inicio + 1 mes) y el anual al INICIO (fecha de pago = inicio).
+function renovarControlSaaS(p) {
+  var hoy = hoyIso(p.hoy); var hoja = getHojaControl();
+  var f = buscarFilaControl(hoja, String(p.id || ""));
+  if (!f) throw "No se encontró el registro. Recarga la pantalla.";
+  var ciclo = siguienteCiclo(f.fecha_suscripcion, f.fecha_pago, f.tipo_suscripcion, hoy);
+  var nuevoMonto = f.monto;
+  if (p.nuevoMonto !== null && p.nuevoMonto !== undefined && p.nuevoMonto !== "") {
+    nuevoMonto = Number(p.nuevoMonto);
+    if (isNaN(nuevoMonto) || nuevoMonto < 0) throw "Monto inválido.";
+  }
+  // Evita renovar dos veces el mismo periodo (doble clic)
+  var existe = leerFilasControl(hoja).some(function(x) {
+    return x.id !== f.id && x.correo.toLowerCase() === f.correo.toLowerCase() && x.plan === f.plan && x.fecha_suscripcion === ciclo.fecha_suscripcion;
+  });
+  if (existe) throw "Ya existe un renglón para ese periodo. Edítalo en lugar de renovar de nuevo.";
+  var id = insertarFilaControl(hoja, { plan: f.plan, correo: f.correo, monto: nuevoMonto, cobrado: false, metodo_pago: f.metodo_pago, tipo_suscripcion: f.tipo_suscripcion, fecha_suscripcion: ciclo.fecha_suscripcion, fecha_pago: ciclo.fecha_pago });
+  sincronizarControlConFinanzas(buscarFilaControl(hoja, id), null, hoy);
+  actualizarEstadosVencimientoSaaS(hoy);
+  return "Se ha generado el nuevo periodo.";
+}
+
+function eliminarRegistroControlSaaS(p) {
+  var hoy = hoyIso(p.hoy); var hoja = getHojaControl();
+  var f = buscarFilaControl(hoja, String(p.id || ""));
+  if (!f) throw "No se encontró el registro. Recarga la pantalla.";
+  hoja.deleteRow(f.fila);
+  invalidarCacheControl();
+  sincronizarControlConFinanzas(null, f, hoy);
+  return "Registro eliminado";
+}
+
+// ==========================================
+// SINCRONIZACIÓN CONTROL → FINANZAS (equivale a los triggers de la base de datos de Freelancer)
+//  · Marcar Cobrado crea el pago en FINANZAS_PAGOS; desmarcarlo lo elimina.
+//  · Se recalcula plan / próximo pago del usuario en FINANZAS_ESTADO (lo que ve en "Mi Suscripción").
+// ==========================================
+function getHojaEstado() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(); var h = ss.getSheetByName("FINANZAS_ESTADO");
+  if (!h) { h = ss.insertSheet("FINANZAS_ESTADO"); h.getRange(1, 1, 1, 4).setValues([["UID", "FECHA BASE", "PLAN", "PRÓXIMO PAGO"]]); }
+  return h;
+}
+function getHojaPagos() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(); var h = ss.getSheetByName("FINANZAS_PAGOS");
+  if (!h) { h = ss.insertSheet("FINANZAS_PAGOS"); h.getRange(1, 1, 1, 11).setValues([["UID", "NOMBRE", "FECHA DE PAGO", "MES", "AÑO", "PLAN", "MÉTODO", "COMPROBANTE", "COSTO", "CONTROL_ID", "CORREO"]]); }
+  else { var enc = h.getRange(1, 10, 1, 2).getValues()[0]; if (!enc[0]) h.getRange(1, 10).setValue("CONTROL_ID"); if (!enc[1]) h.getRange(1, 11).setValue("CORREO"); }
+  return h;
+}
+function filaPagoPorControl(hojaPagos, controlId) {
+  var n = hojaPagos.getLastRow(); if (n < 2 || !controlId) return 0;
+  var ids = hojaPagos.getRange(2, 10, n - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) { if (String(ids[i][0]) === controlId) return i + 2; }
+  return 0;
+}
+function insertarPagoDeControl(hojaPagos, f, usuario) {
+  var fecha = f.fecha_pago || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  var d = parseFechaIso(fecha);
+  hojaPagos.appendRow([usuario.uid, usuario.nombre, d, MESES_UP[d.getMonth()], d.getFullYear(), f.tipo_suscripcion, f.metodo_pago || "", f.comprobante_url || "", f.monto, f.id, usuario.correo]);
+}
+
+function recalcularSuscripcionSaaS(correo) {
+  var usuario = usuarioPorCorreo(correo); if (!usuario) return;
+  CacheService.getScriptCache().remove("dash_" + usuario.uid);   // el cliente ve su estado de pago al instante
+  var hojaEstado = getHojaEstado(); var uid = usuario.uid;
+  var filas = leerFilasControl(getHojaControl()).filter(function(f) { return f.correo.toLowerCase() === usuario.correo.toLowerCase(); });
+  var hojaPagos = getHojaPagos(); var np = hojaPagos.getLastRow();
+  var tienePagos = false;
+  if (np >= 2) { var uids = hojaPagos.getRange(2, 1, np - 1, 1).getValues(); for (var i = 0; i < uids.length; i++) { if (uids[i][0] === uid) { tienePagos = true; break; } } }
+
+  var ne = hojaEstado.getLastRow(); var filaEstado = 0;
+  if (ne >= 2) { var ue = hojaEstado.getRange(2, 1, ne - 1, 1).getValues(); for (var j = 0; j < ue.length; j++) { if (ue[j][0] === uid) { filaEstado = j + 2; break; } } }
+
+  if (!filas.length && !tienePagos) { if (filaEstado) hojaEstado.deleteRow(filaEstado); return; }
+  var pendiente = null, ultimo = null;
+  filas.forEach(function(f) {
+    if (!f.fecha_pago) return;
+    if (!f.cobrado && (!pendiente || f.fecha_pago < pendiente.fecha_pago)) pendiente = f;
+    if (f.cobrado && (!ultimo || f.fecha_pago > ultimo.fecha_pago)) ultimo = f;
+  });
+  var plan, proximo, base;
+  if (pendiente) { plan = pendiente.tipo_suscripcion; proximo = pendiente.fecha_pago; base = pendiente.fecha_suscripcion; }
+  else if (ultimo) { plan = ultimo.tipo_suscripcion; proximo = sumarMesesIso(ultimo.fecha_pago, plan === "Anual" ? 12 : 1); base = ultimo.fecha_suscripcion || ultimo.fecha_pago; }
+  else return; // solo hay pagos antiguos sin filas de control: se deja como está
+  var valores = [[uid, base ? parseFechaIso(base) : "", plan, parseFechaIso(proximo)]];
+  if (filaEstado) hojaEstado.getRange(filaEstado, 1, 1, 4).setValues(valores);
+  else hojaEstado.getRange(Math.max(2, ne + 1), 1, 1, 4).setValues(valores);
+}
+
+function actualizarPagoDeControl(hojaPagos, fila, f) {
+  var d = parseFechaIso(f.fecha_pago) || parseFechaIso(hoyIso());
+  var actual = hojaPagos.getRange(fila, 7, 1, 3).getValues()[0];   // G método · H recibo · I monto
+  // C fecha · D mes · E año · F plan · G método · H recibo · I monto
+  hojaPagos.getRange(fila, 3, 1, 7).setValues([[d, MESES_UP[d.getMonth()], d.getFullYear(), f.tipo_suscripcion, f.metodo_pago || actual[0], f.comprobante_url || actual[1], f.monto]]);
+}
+
+function sincronizarControlConFinanzas(nueva, previa, hoy) {
+  var hojaPagos = getHojaPagos();
+  if (!nueva) { // fila eliminada: el pago se conserva en el historial, solo se desvincula
+    var fp = filaPagoPorControl(hojaPagos, previa.id); if (fp) hojaPagos.getRange(fp, 10).setValue("");
+    recalcularSuscripcionSaaS(previa.correo); return;
+  }
+  // Si el correo todavía no está registrado el pago se guarda igual (sin UID) y se enlaza cuando el usuario se registre
+  var usuario = usuarioPorCorreo(nueva.correo) || { uid: "", nombre: "", correo: nueva.correo };
+  var registrado = !!usuarioPorCorreo(nueva.correo);
+  if (previa && previa.correo.toLowerCase() !== nueva.correo.toLowerCase()) {
+    var fm = filaPagoPorControl(hojaPagos, nueva.id);
+    if (fm) { hojaPagos.getRange(fm, 1, 1, 2).setValues([[usuario.uid, usuario.nombre]]); hojaPagos.getRange(fm, 11).setValue(usuario.correo); }
+    if (previa.correo) recalcularSuscripcionSaaS(previa.correo);
+  }
+  if (nueva.cobrado) {
+    var fila = filaPagoPorControl(hojaPagos, nueva.id);
+    if (!fila) insertarPagoDeControl(hojaPagos, nueva, usuario);
+    else if (previa && (previa.monto !== nueva.monto || previa.comprobante_url !== nueva.comprobante_url || previa.metodo_pago !== nueva.metodo_pago || previa.fecha_pago !== nueva.fecha_pago || previa.tipo_suscripcion !== nueva.tipo_suscripcion)) {
+      actualizarPagoDeControl(hojaPagos, fila, nueva);   // ahora también se sincronizan fecha, mes, año y tipo de plan
+    }
+  } else if (previa && previa.cobrado && !nueva.cobrado) {
+    var fe = filaPagoPorControl(hojaPagos, nueva.id); if (fe) hojaPagos.deleteRow(fe);
+  }
+  if (registrado) recalcularSuscripcionSaaS(nueva.correo);
+}
+
+// Una sola vez: IDs, tipo "Mensual" por defecto y pago en el historial de cada cuota ya cobrada.
+function migrarControlSaaSV2() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty("CONTROL_SAAS_V2") === "ok") return;
+  var hoja = getHojaControl(); var filas = leerFilasControl(hoja);
+  if (filas.length) {
+    var primera = filas[0].fila; var ultima = filas[filas.length - 1].fila;
+    var rango = hoja.getRange(primera, 14, ultima - primera + 1, 1); var vals = rango.getValues();
+    filas.forEach(function(f) { if (vals[f.fila - primera][0] === "") vals[f.fila - primera][0] = "Mensual"; });
+    rango.setValues(vals);
+  }
+  var hojaPagos = getHojaPagos(); var np = hojaPagos.getLastRow();
+  var pagos = np >= 2 ? hojaPagos.getRange(2, 1, np - 1, 11).getValues() : [];
+  filas.forEach(function(f) {
+    var usuario = usuarioPorCorreo(f.correo); if (!f.cobrado || !usuario) return;
+    if (filaPagoPorControl(hojaPagos, f.id)) return;
+    var d = parseFechaIso(f.fecha_pago); var vinculado = 0;
+    for (var i = 0; i < pagos.length; i++) { // pago manual antiguo del mismo usuario, mes y monto: se vincula en vez de duplicarlo
+      if (pagos[i][0] === usuario.uid && !pagos[i][9] && d && String(pagos[i][3]).toUpperCase() === MESES_UP[d.getMonth()] && Number(pagos[i][4]) === d.getFullYear() && Number(pagos[i][8]) === f.monto) { vinculado = i + 2; pagos[i][9] = f.id; break; }
+    }
+    if (vinculado) hojaPagos.getRange(vinculado, 10, 1, 2).setValues([[f.id, usuario.correo]]);
+    else insertarPagoDeControl(hojaPagos, f, usuario);
+  });
+  var vistos = {};
+  filas.forEach(function(f) { var k = f.correo.toLowerCase(); if (f.correo && !vistos[k]) { vistos[k] = true; recalcularSuscripcionSaaS(f.correo); } });
+  invalidarCacheControl();
+  props.setProperty("CONTROL_SAAS_V2", "ok");
+}
+
+// Una sola vez: cuotas cobradas sin pago en el historial (correo no registrado en su momento).
+function migrarControlSaaSV3() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty("CONTROL_SAAS_V3") === "ok") return;
+  var hoja = getHojaControl(); var filas = leerFilasControl(hoja);
+  var hojaPagos = getHojaPagos(); var np = hojaPagos.getLastRow();
+  var existentes = {};
+  if (np >= 2) { var ids = hojaPagos.getRange(2, 10, np - 1, 1).getValues(); for (var i = 0; i < ids.length; i++) { if (ids[i][0]) existentes[String(ids[i][0])] = true; } }
+  filas.forEach(function(f) {
+    if (!f.cobrado || !f.id || existentes[f.id]) return;
+    var usuario = usuarioPorCorreo(f.correo) || { uid: "", nombre: "", correo: f.correo };
+    insertarPagoDeControl(hojaPagos, f, usuario);
+    existentes[f.id] = true;
+  });
+  props.setProperty("CONTROL_SAAS_V3", "ok");
+}
+
+// ==========================================
+// MOTOR DE COBRO (equivale a /api/cobros de Freelancer)
+// ==========================================
+function rellenarPlantillaCobro(plantilla, d) {
+  return String(plantilla).split("[Nombre]").join(d.nombre).split("[Proyecto]").join(d.proyecto).split("[Monto]").join(String(d.monto));
+}
+function escaparHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+
+// Asunto sobrio (sin emojis) + texto y HTML + pie que identifica quién envía: toleran mejor los filtros anti-spam.
+function construirCorreoCobro(d) {
+  var concepto = String(d.concepto || "Pendiente").replace(/[\r\n]+/g, " ").trim().substring(0, 80);
+  var firma = d.remitente || d.responderA;
+  var pie = "Recibes este mensaje de " + firma + " por un pago pendiente. Si ya realizaste el pago, ignora este recordatorio o responde a este correo.";
+  var cuerpo = String(d.cuerpo).trim();
+  var text = cuerpo + "\n\nSaludos,\n" + firma + "\n\n--\n" + pie;
+  var parrafos = cuerpo.split(/\n{2,}/).map(function(p) { return '<p style="margin:0 0 14px">' + escaparHtml(p).replace(/\n/g, "<br>") + "</p>"; }).join("");
+  var html = '<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#222;max-width:560px">' + parrafos +
+    '<p style="margin:18px 0 0">Saludos,<br>' + escaparHtml(firma) + "</p>" +
+    '<hr style="border:none;border-top:1px solid #ddd;margin:22px 0 10px">' +
+    '<p style="margin:0;font-size:12px;color:#777">' + escaparHtml(pie) + "</p></div>";
+  return { subject: "Recordatorio de pago de tu plan: " + concepto, text: text, html: html };
+}
+
+function obtenerConfigRemitente() {
+  var props = PropertiesService.getScriptProperties();
+  var alias = props.getProperty("COBRO_ALIAS") || "";
+  return { alias: alias, nombre: props.getProperty("COBRO_NOMBRE") || "", direccion: alias || Session.getEffectiveUser().getEmail() };
+}
+
+function obtenerRemitenteCobro() {
+  var c = obtenerConfigRemitente(); var aliases = [];
+  try { aliases = GmailApp.getAliases(); } catch (e) {}
+  return { direccion: Session.getEffectiveUser().getEmail(), alias: c.alias, nombre: c.nombre, aliases: aliases };
+}
+
+function guardarRemitenteCobro(p) {
+  var alias = String(p.alias || "").trim(); var nombre = String(p.nombre || "").replace(/["<>\r\n]/g, "").trim();
+  if (alias) {
+    var aliases = []; try { aliases = GmailApp.getAliases(); } catch (e) {}
+    if (aliases.indexOf(alias) === -1) throw "Ese correo no está configurado como «Enviar como» en tu Gmail.";
+  }
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty("COBRO_ALIAS", alias); props.setProperty("COBRO_NOMBRE", nombre);
+  return "Tus recordatorios ahora saldrán desde " + (alias || Session.getEffectiveUser().getEmail()) + ".";
+}
+
+function ejecutarEnvioCobroSaaS(p) {
+  var hoy = hoyIso(p && p.hoy);
+  var hojaScripts = obtenerHojaScripts();
+  var scripts = [hojaScripts.getRange("B6").getValue(), hojaScripts.getRange("B14").getValue(), hojaScripts.getRange("B22").getValue()];
+  var hoja = getHojaControl(); var filas = leerFilasControl(hoja); var pendientes = [];
+  filas.forEach(function(f) { var et = etapaPendienteFila(f, hoy); if (et >= 0) pendientes.push({ f: f, etapa: et }); });
+  if (!pendientes.length) { actualizarEstadosVencimientoSaaS(hoy); return { mensaje: "No hay recordatorios pendientes por enviar.", enviados: 0 }; }
+
+  var rem = obtenerConfigRemitente(); var mapa = mapaUsuarios();
+  var cuota = MailApp.getRemainingDailyQuota();
+  var enviados = 0, sinCorreo = 0, sinPlantilla = 0, sinCuota = 0, restantes = 0; var fallidos = []; var primero = true;
+
+  for (var i = 0; i < pendientes.length; i++) {
+    var f = pendientes[i].f; var etapa = pendientes[i].etapa;
+    if (!f.correo || f.correo.indexOf("@") < 0) { sinCorreo++; continue; }
+    if (!scripts[etapa]) { sinPlantilla++; continue; }
+    if (enviados >= cuota) { sinCuota++; continue; }
+    if (enviados >= MAX_ENVIOS_POR_EJECUCION) { restantes++; continue; }   // lote máximo por ejecución: vuelve a ejecutar para el resto
+    var u = mapa[f.correo.toLowerCase()];
+    var nombre = (u && u.nombre) ? u.nombre : f.correo.split("@")[0];
+    var texto = rellenarPlantillaCobro(scripts[etapa], { nombre: nombre, proyecto: f.plan || "Suscripción", monto: f.monto });
+    var correo = construirCorreoCobro({ concepto: f.plan || "Suscripción", cuerpo: texto, remitente: rem.nombre, responderA: rem.direccion });
+    if (!primero) Utilities.sleep(800); // una ráfaga idéntica se parece a spam masivo
+    primero = false;
+    try {
+      var op = { htmlBody: correo.html, replyTo: rem.direccion };
+      if (rem.nombre) op.name = rem.nombre;
+      if (rem.alias) op.from = rem.alias;
+      GmailApp.sendEmail(f.correo, correo.subject, correo.text, op);
+      enviados++;
+      hoja.getRange(f.fila, ETAPAS_COBRO[etapa].col).setValue("ENVIADO");
+      // las etapas anteriores que nunca se enviaron quedan como OMITIDO (no se mandará un aviso viejo después)
+      for (var k = 0; k < etapa; k++) { if (!marcaHecha(f.marcas[k])) hoja.getRange(f.fila, ETAPAS_COBRO[k].col).setValue("OMITIDO"); }
+    } catch (e) { fallidos.push(f.correo + " (" + String(e.message || e).split("\n")[0].substring(0, 200) + ")"); }
+  }
+  invalidarCacheControl();
+  actualizarEstadosVencimientoSaaS(hoy);
+  var mensaje = "Se enviaron " + enviados + " recordatorios de cobro.";
+  if (sinCorreo) mensaje += " " + sinCorreo + " vencidos no tienen un correo válido.";
+  if (sinPlantilla) mensaje += " " + sinPlantilla + " no se enviaron porque su plantilla está vacía.";
+  if (sinCuota) mensaje += " " + sinCuota + " quedaron pendientes por el límite diario de correos de Google.";
+  if (restantes) mensaje += " Quedan " + restantes + " por enviar: vuelve a ejecutar el cobro.";
+  if (fallidos.length) mensaje += " Fallaron: " + fallidos.join("; ") + ".";
+  return { mensaje: mensaje, enviados: enviados };
+}
+
+// ==========================================
+// REPORTE FINANCIERO ADMIN (cobros con fecha de pago; cliente = correo del usuario)
+// ==========================================
+// Los reportes leen FINANZAS_PAGOS (la misma fuente del panel de Finanzas), así los totales siempre coinciden.
+function leerPagosParaReporte() {
+  migrarControlSaaSV2(); migrarControlSaaSV3();
+  var hp = getHojaPagos(); var n = hp.getLastRow(); if (n < 2) return [];
+  var vals = hp.getRange(2, 1, n - 1, 11).getValues(); var out = [];
+  vals.forEach(function(f) {
+    if (!f[0] && !f[10]) return;
+    var iso = aIsoFecha(f[2]); var anio, mes;
+    if (iso) { anio = Number(iso.substring(0, 4)); mes = Number(iso.substring(5, 7)) - 1; }
+    else { anio = Number(f[4]); mes = MESES_UP.indexOf(String(f[3]).toUpperCase()); }
+    if (!anio || mes < 0) return;
+    out.push({ anio: anio, mes: mes, monto: parseFloat(f[8]) || 0, cliente: String(f[10] || f[1] || "").trim() });
+  });
+  return out;
+}
+
+function obtenerDatosReporteAnualSaaS(anio) {
+  try {
+    var meses = []; for (var m = 0; m < 12; m++) meses.push(0); var total = 0;
+    leerPagosParaReporte().forEach(function(pg) {
+      if (pg.anio === Number(anio)) { meses[pg.mes] += pg.monto; total += pg.monto; }
+    });
+    return { meses: meses.map(round2), total: round2(total) };
+  } catch (e) { return { error: mensajeError(e) }; }
+}
+
+function obtenerDatosReporteClientesSaaS(anio, mesTexto) {
+  try {
+    var mesIndex = MESES_UP.indexOf(String(mesTexto).toUpperCase()); var mapa = {}; var orden = [];
+    leerPagosParaReporte().forEach(function(pg) {
+      if (pg.anio === Number(anio) && pg.mes === mesIndex) {
+        var cliente = pg.cliente || "Sin Usuario";
+        if (mapa[cliente] === undefined) { mapa[cliente] = 0; orden.push(cliente); }
+        mapa[cliente] += pg.monto;
+      }
+    });
+    return { labels: orden, valores: orden.map(function(c) { return round2(mapa[c]); }) };
+  } catch (e) { return { error: mensajeError(e) }; }
+}
+
+// ==========================================
+// SCRIPTS DE COBRO
+// ==========================================
+function obtenerHojaScripts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hoja = ss.getSheetByName("SCRIPTS DE COBRO");
+  if (!hoja) {
+    hoja = ss.insertSheet("SCRIPTS DE COBRO");
+    hoja.getRange("B5").setValue("RECORDATORIO VENCE HOY");
+    hoja.getRange("B6").setValue("Hola [Nombre], tu suscripción [Proyecto] de $[Monto] vence hoy.");
+    hoja.getRange("B13").setValue("RECORDATORIO VENCIDO 7 DIAS");
+    hoja.getRange("B14").setValue("Hola [Nombre], tu suscripción [Proyecto] tiene 7 días de retraso.");
+    hoja.getRange("B21").setValue("RECORDATORIO VENCIDO 15 DIAS");
+    hoja.getRange("B22").setValue("Hola [Nombre], tu suscripción [Proyecto] ha sido suspendida.");
+  }
+  return hoja;
+}
+
+function obtenerScripts() {
+  var hoja = obtenerHojaScripts();
+  return { s0: hoja.getRange("B6").getValue(), s7: hoja.getRange("B14").getValue(), s15: hoja.getRange("B22").getValue() };
+}
+
+function actualizarScripts(s) {
+  var hoja = obtenerHojaScripts();
+  hoja.getRange("B6").setValue(celdaSegura(String(s.s0 || "").substring(0, 3000)));
+  hoja.getRange("B14").setValue(celdaSegura(String(s.s7 || "").substring(0, 3000)));
+  hoja.getRange("B22").setValue(celdaSegura(String(s.s15 || "").substring(0, 3000)));
+  return "Scripts guardados exitosamente";
+}
