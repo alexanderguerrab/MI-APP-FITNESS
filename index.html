@@ -351,6 +351,10 @@
            <button class="btn-cerrar" onclick="window.open('https://wa.me/584124231008', '_blank')" style="border-color:#00FF7F; color:#00FF7F; flex:1;">📱 WhatsApp</button>
            <button class="btn-cerrar" onclick="abrirSoporteEmail()" style="border-color:#00BFFF; color:#00BFFF; flex:1;">✉️ Email</button>
         </div>
+
+        <p style="color:#A0AEC0; font-size:13px; margin:18px 0 0; text-align:center; line-height:1.5;">Al continuar aceptas los:<br>
+          <a href="/terminos" target="_blank" rel="noopener" style="color:#00BFFF; display:block; margin-top:6px;">1. Términos y condiciones</a>
+          <a href="/privacidad" target="_blank" rel="noopener" style="color:#00BFFF; display:block; margin-top:4px;">2. Políticas de privacidad</a></p>
       </div>
     </div>
 
@@ -370,6 +374,10 @@
         </ul>
         <label class="input-label">Teléfono (con cód. de área)</label>
         <input type="text" id="reg-telefono" class="modal-input" placeholder="+1234567890" maxlength="25" inputmode="tel">
+        <label style="display:flex; gap:8px; align-items:flex-start; text-align:left; color:#A0AEC0; font-size:12px; margin:4px 0 12px; line-height:1.4;">
+          <input type="checkbox" id="reg-acepto" style="width:auto; margin-top:2px; flex:none;">
+          <span>Acepto los <a href="/terminos" target="_blank" rel="noopener" style="color:#00BFFF;">Términos y condiciones</a> y la <a href="/privacidad" target="_blank" rel="noopener" style="color:#00BFFF;">Política de privacidad</a>.</span>
+        </label>
         <button class="btn-guardar" onclick="crearCuentaFirebase()">Registrarse</button>
         <button class="btn-cerrar" onclick="cerrarModalRegistro()">Volver al Login</button>
       </div>
@@ -550,6 +558,8 @@
       <ul class="menu" style="padding-top: 0;">
         <li class="menu-item" onclick="window.open('https://wa.me/584124231008', '_blank')">📱 Soporte WhatsApp</li>
         <li class="menu-item" onclick="abrirSoporteEmail()">✉️ Soporte Email</li>
+        <li class="menu-item" onclick="window.open('/terminos', '_blank', 'noopener')">📜 Términos y Condiciones</li>
+        <li class="menu-item" onclick="window.open('/privacidad', '_blank', 'noopener')">🔒 Política de Privacidad</li>
         <li class="menu-item menu-item-logout" onclick="cerrarSesionFirebase()">🚪 Cerrar Sesión</li>
       </ul>
     </div>
@@ -1027,6 +1037,7 @@
         if(!email || !pass || !tel) { Swal.fire("Aviso", "Ingresa correo, contraseña y teléfono", "warning"); return; }
         if(!passwordValida(pass)) { Swal.fire("Contraseña débil", "Mínimo 8 caracteres, con mayúscula, minúscula y un carácter especial (ej. @, #, !, $).", "warning"); return; }
         if(!telefonoValido(tel)) { Swal.fire("Teléfono inválido", "Usa solo números, espacios y el signo + (ej. +584121234567).", "warning"); return; }
+        if(!document.getElementById('reg-acepto').checked) { Swal.fire("Aviso", "Para crear tu cuenta debes aceptar los Términos y condiciones y la Política de privacidad.", "warning"); return; }
 
         firebase.auth().createUserWithEmailAndPassword(email, pass)
           .then((userCred) => {
